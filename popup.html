@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Real-Time Subtitles</title>
+    <style>
+      body {
+        margin: 0;
+        width: 320px;
+        padding: 16px;
+        font-family: "Segoe UI", Arial, sans-serif;
+        background: #111827;
+        color: #f9fafb;
+      }
+
+      h1 {
+        margin: 0 0 12px;
+        font-size: 18px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid #374151;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #f9fafb;
+      }
+
+      button {
+        width: 100%;
+        margin-top: 12px;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      #saveButton {
+        background: #2563eb;
+        color: #ffffff;
+      }
+
+      #toggleButton {
+        background: #10b981;
+        color: #062a1e;
+      }
+
+      #toggleButton.stop {
+        background: #ef4444;
+        color: #ffffff;
+      }
+
+      #warning {
+        margin-top: 10px;
+        font-size: 12px;
+        line-height: 1.45;
+        color: #fbbf24;
+      }
+
+      #status {
+        min-height: 18px;
+        margin-top: 10px;
+        font-size: 12px;
+        color: #cbd5e1;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Real-Time Subtitles</h1>
+    <label for="apiKeyInput">Deepgram API key</label>
+    <input id="apiKeyInput" type="password" placeholder="Paste your Deepgram API key">
+    <button id="saveButton" type="button">Save API Key</button>
+    <button id="toggleButton" type="button">Start Subtitles</button>
+    <div id="warning">Warning: this API key is stored locally inside the extension.</div>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+  </html>

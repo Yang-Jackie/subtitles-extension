@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Real-Time Tab Subtitles",
+  "description": "Displays real-time subtitles for audio playing in the current browser tab using Deepgram.",
+  "version": "1.0.0",
+  "permissions": [
+    "activeTab",
+    "offscreen",
+    "scripting",
+    "storage",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "https://api.deepgram.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Real-Time Subtitles"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "pcm-processor.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://api.deepgram.com wss://api.deepgram.com"
+  }
+}

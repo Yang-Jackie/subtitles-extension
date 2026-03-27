@@ -1,0 +1,10 @@
+# OS files
+Thumbs.db
+.DS_Store
+
+# Editor settings
+.idea/
+.vscode/
+
+# Packaged extension artifacts
+*.zip
