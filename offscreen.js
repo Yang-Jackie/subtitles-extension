@@ -1,6 +1,7 @@
 const DEEPGRAM_BASE_URL = "wss://api.deepgram.com/v1/listen";
-const TARGET_SAMPLE_RATE = 16000;
+const DEEPGRAM_MODEL = "nova-3";
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
+const DEBUG_DEEPGRAM = true;
 const sessions = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -173,20 +174,22 @@ function flushPcmQueue(session) {
   }
   session.pcmQueue.length = 0;
 
-  const downsampled = downsampleBuffer(combined, session.currentSampleRate, TARGET_SAMPLE_RATE);
-  if (downsampled.length === 0) {
+  const processed = downsampleBuffer(combined, session.currentSampleRate, session.currentSampleRate);
+  if (processed.length === 0) {
     return;
   }
 
-  const linear16 = floatToInt16Buffer(downsampled);
+  const linear16 = floatToInt16Buffer(processed);
   session.websocket.send(linear16.buffer);
 }
 
 async function openDeepgramWebSocket(session) {
   const params = new URLSearchParams({
+    model: DEEPGRAM_MODEL,
     encoding: "linear16",
-    sample_rate: String(TARGET_SAMPLE_RATE),
+    sample_rate: String(session.currentSampleRate),
     language: session.language,
+    punctuate: "true",
     interim_results: "true",
     endpointing: "300"
   });
@@ -235,6 +238,19 @@ function handleDeepgramMessage(session, rawMessage) {
   } catch (error) {
     console.warn("Skipping non-JSON Deepgram message", error);
     return;
+  }
+
+  if (DEBUG_DEEPGRAM) {
+    const alternative = payload?.channel?.alternatives?.[0];
+    const words = alternative?.words || [];
+    console.log("Deepgram update", {
+      type: payload.type,
+      is_final: Boolean(payload.is_final),
+      speech_final: Boolean(payload.speech_final),
+      transcript: (alternative?.transcript || "").trim(),
+      word_count: words.length,
+      word_tail: words.slice(-5).map((word) => word.word).filter(Boolean)
+    });
   }
 
   if (payload.type === "Metadata" || payload.type === "UtteranceEnd") {

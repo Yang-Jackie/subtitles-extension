@@ -1,10 +1,14 @@
 const OVERLAY_ID = "dg-live-subtitles-overlay";
 const CLEAR_DELAY_MS = 3000;
+const INTERIM_RENDER_DELAY_MS = 120;
+const LIVE_TAIL_WORD_LIMIT = 6;
 
 let overlayRoot = null;
 let finalLine = "";
-let interimLine = "";
+let liveTail = "";
+let pendingInterimText = "";
 let clearTimer = null;
+let interimRenderTimer = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message?.type) {
@@ -67,6 +71,12 @@ function renderSubtitle(message) {
   const status = message.status || "";
 
   if (status) {
+    pendingInterimText = "";
+    liveTail = "";
+    if (interimRenderTimer) {
+      clearTimeout(interimRenderTimer);
+      interimRenderTimer = null;
+    }
     overlay.innerHTML = `<span style="color: rgba(255, 255, 255, 0.88);">${escapeHtml(status)}</span>`;
     overlay.style.display = "block";
     scheduleClear();
@@ -74,18 +84,56 @@ function renderSubtitle(message) {
   }
 
   if (message.isFinal) {
+    pendingInterimText = "";
+    if (interimRenderTimer) {
+      clearTimeout(interimRenderTimer);
+      interimRenderTimer = null;
+    }
+
     finalLine = message.text || "";
-    interimLine = "";
-  } else {
-    interimLine = message.text || "";
+    liveTail = "";
+
+    if (!finalLine) {
+      clearSubtitle(false);
+      return;
+    }
+
+    renderOverlay();
+    scheduleClear();
+    return;
   }
 
+  pendingInterimText = message.text || "";
+  if (interimRenderTimer) {
+    clearTimeout(interimRenderTimer);
+  }
+
+  interimRenderTimer = setTimeout(() => {
+    interimRenderTimer = null;
+    liveTail = deriveLiveTail(finalLine, pendingInterimText);
+
+    if (!finalLine && !liveTail) {
+      clearSubtitle(false);
+      return;
+    }
+
+    renderOverlay();
+    scheduleClear();
+  }, INTERIM_RENDER_DELAY_MS);
+}
+
+function renderOverlay() {
+  const overlay = ensureOverlay();
   const fragments = [];
+
   if (finalLine) {
     fragments.push(`<span style="color: #ffffff;">${escapeHtml(finalLine)}</span>`);
   }
-  if (interimLine) {
-    fragments.push(`<span style="color: rgba(255, 255, 255, 0.7);">${escapeHtml(interimLine)}</span>`);
+
+  if (liveTail) {
+    fragments.push(
+      `<span style="color: rgba(255, 255, 255, 0.72); font-size: 0.9em;">${escapeHtml(liveTail)}</span>`
+    );
   }
 
   if (fragments.length === 0) {
@@ -95,7 +143,6 @@ function renderSubtitle(message) {
 
   overlay.innerHTML = fragments.join("<br>");
   overlay.style.display = "block";
-  scheduleClear();
 }
 
 function scheduleClear() {
@@ -107,22 +154,60 @@ function scheduleClear() {
 }
 
 function clearSubtitle(resetState) {
+  pendingInterimText = "";
+  liveTail = "";
+
   if (clearTimer) {
     clearTimeout(clearTimer);
     clearTimer = null;
   }
 
+  if (interimRenderTimer) {
+    clearTimeout(interimRenderTimer);
+    interimRenderTimer = null;
+  }
+
   if (resetState) {
     finalLine = "";
-    interimLine = "";
   } else {
-    interimLine = "";
     finalLine = "";
   }
 
   const overlay = ensureOverlay();
   overlay.innerHTML = "";
   overlay.style.display = "none";
+}
+
+function deriveLiveTail(committedText, interimText) {
+  const committedWords = tokenizeWords(committedText);
+  const interimWords = tokenizeWords(interimText);
+
+  if (interimWords.length === 0) {
+    return "";
+  }
+
+  let prefixLength = 0;
+  while (
+    prefixLength < committedWords.length &&
+    prefixLength < interimWords.length &&
+    normalizeWord(committedWords[prefixLength]) === normalizeWord(interimWords[prefixLength])
+  ) {
+    prefixLength += 1;
+  }
+
+  const remainingWords = prefixLength > 0 ? interimWords.slice(prefixLength) : interimWords;
+  const tailWords = remainingWords.slice(-LIVE_TAIL_WORD_LIMIT);
+  return tailWords.join(" ");
+}
+
+function tokenizeWords(text) {
+  return (text || "").trim().split(/\s+/).filter(Boolean);
+}
+
+function normalizeWord(word) {
+  return word
+    .toLowerCase()
+    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, "");
 }
 
 function escapeHtml(text) {
