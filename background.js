@@ -1,6 +1,19 @@
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const OFFSCREEN_URL = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
 const DEFAULT_LANGUAGE = "en";
+const DEFAULT_MODEL_PRESET = "nova-3-monolingual";
+const MODEL_PRESETS = {
+  "nova-3-monolingual": {
+    endpointPath: "/v1/listen",
+    model: "nova-3",
+    language: "en"
+  },
+  "nova-3-multilingual": {
+    endpointPath: "/v1/listen",
+    model: "nova-3",
+    language: "multi"
+  }
+};
 const SESSION_STATES = {
   idle: "idle",
   starting: "starting",
@@ -53,10 +66,13 @@ async function handleMessage(message, sender) {
     case "save_api_key":
       await chrome.storage.local.set({ deepgramApiKey: message.apiKey || "" });
       return { ok: true };
+    case "save_model_preset":
+      await chrome.storage.local.set({ deepgramModelPreset: message.modelPreset || DEFAULT_MODEL_PRESET });
+      return { ok: true };
     case "get_state":
       return getPopupState(message.tabId);
     case "start_subtitles":
-      return startSubtitlesForTab(message.tabId);
+      return startSubtitlesForTab(message.tabId, message.modelPreset);
     case "stop_subtitles":
       return stopSubtitlesForTab(message.tabId);
     case "session_status":
@@ -69,19 +85,23 @@ async function handleMessage(message, sender) {
 }
 
 async function getPopupState(tabId) {
-  const { deepgramApiKey = "" } = await chrome.storage.local.get("deepgramApiKey");
+  const { deepgramApiKey = "", deepgramModelPreset = DEFAULT_MODEL_PRESET } = await chrome.storage.local.get([
+    "deepgramApiKey",
+    "deepgramModelPreset"
+  ]);
   const session = sessions.get(tabId);
 
   return {
     ok: true,
     apiKeySaved: Boolean(deepgramApiKey),
+    modelPreset: deepgramModelPreset,
     active: session?.state === SESSION_STATES.listening || session?.state === SESSION_STATES.reconnecting,
     state: session?.state || SESSION_STATES.idle,
     error: session?.lastError || ""
   };
 }
 
-async function startSubtitlesForTab(tabId) {
+async function startSubtitlesForTab(tabId, requestedModelPreset) {
   if (!tabId) {
     throw new Error("No active tab available");
   }
@@ -95,6 +115,10 @@ async function startSubtitlesForTab(tabId) {
   if (!deepgramApiKey) {
     throw new Error("Deepgram API key is required");
   }
+
+  const { deepgramModelPreset = DEFAULT_MODEL_PRESET } = await chrome.storage.local.get("deepgramModelPreset");
+  const modelPreset = requestedModelPreset || deepgramModelPreset || DEFAULT_MODEL_PRESET;
+  const modelConfig = resolveModelPreset(modelPreset);
 
   await ensureContentScript(tabId);
   await ensureOffscreenDocument();
@@ -134,7 +158,9 @@ async function startSubtitlesForTab(tabId) {
     tabId,
     streamId,
     apiKey: deepgramApiKey,
-    language: DEFAULT_LANGUAGE
+    language: DEFAULT_LANGUAGE,
+    modelPreset,
+    modelConfig
   });
 
   if (!response?.ok) {
@@ -283,4 +309,8 @@ function sendOffscreenMessage(message) {
 
 function sendTabMessage(tabId, message) {
   return chrome.tabs.sendMessage(tabId, message);
+}
+
+function resolveModelPreset(modelPreset) {
+  return MODEL_PRESETS[modelPreset] || MODEL_PRESETS[DEFAULT_MODEL_PRESET];
 }

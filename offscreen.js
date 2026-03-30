@@ -1,5 +1,6 @@
 const DEEPGRAM_BASE_URL = "wss://api.deepgram.com/v1/listen";
-const DEEPGRAM_MODEL = "nova-3";
+const DEFAULT_MODEL = "nova-3";
+const TARGET_SAMPLE_RATE = 16000;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 const DEBUG_DEEPGRAM = true;
 const sessions = new Map();
@@ -32,7 +33,7 @@ async function handleRuntimeMessage(message) {
   }
 }
 
-async function startCapture({ tabId, streamId, apiKey, language }) {
+async function startCapture({ tabId, streamId, apiKey, language, model }) {
   await stopCapture(tabId, { notifyStopped: false });
 
   const mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -54,6 +55,7 @@ async function startCapture({ tabId, streamId, apiKey, language }) {
     tabId,
     apiKey,
     language,
+    model,
     mediaStream
   });
 
@@ -61,11 +63,12 @@ async function startCapture({ tabId, streamId, apiKey, language }) {
   await session.initPromise;
 }
 
-function createSession({ tabId, apiKey, language, mediaStream }) {
+function createSession({ tabId, apiKey, language, model, mediaStream }) {
   const session = {
     tabId,
     apiKey,
     language,
+    model: model || DEFAULT_MODEL,
     mediaStream,
     audioContext: null,
     playbackContext: null,
@@ -174,20 +177,20 @@ function flushPcmQueue(session) {
   }
   session.pcmQueue.length = 0;
 
-  const processed = downsampleBuffer(combined, session.currentSampleRate, session.currentSampleRate);
-  if (processed.length === 0) {
+  const downsampled = downsampleBuffer(combined, session.currentSampleRate, TARGET_SAMPLE_RATE);
+  if (downsampled.length === 0) {
     return;
   }
 
-  const linear16 = floatToInt16Buffer(processed);
+  const linear16 = floatToInt16Buffer(downsampled);
   session.websocket.send(linear16.buffer);
 }
 
 async function openDeepgramWebSocket(session) {
   const params = new URLSearchParams({
-    model: DEEPGRAM_MODEL,
+    model: session.model || DEFAULT_MODEL,
     encoding: "linear16",
-    sample_rate: String(session.currentSampleRate),
+    sample_rate: String(TARGET_SAMPLE_RATE),
     language: session.language,
     punctuate: "true",
     interim_results: "true",
@@ -198,22 +201,47 @@ async function openDeepgramWebSocket(session) {
   const protocols = ["token", session.apiKey];
 
   await new Promise((resolve, reject) => {
+    console.log("Opening Deepgram websocket", {
+      tabId: session.tabId,
+      model: session.model || DEFAULT_MODEL,
+      sampleRate: session.currentSampleRate,
+      language: session.language
+    });
+
     const websocket = new WebSocket(url, protocols);
     websocket.binaryType = "arraybuffer";
     session.websocket = websocket;
 
     websocket.onopen = async () => {
+      console.log("Deepgram websocket connected", {
+        tabId: session.tabId,
+        model: session.model || DEFAULT_MODEL,
+        sampleRate: session.currentSampleRate
+      });
       session.reconnectAttempt = 0;
       resolve();
     };
 
     websocket.onmessage = (event) => handleDeepgramMessage(session, event.data);
 
-    websocket.onerror = () => {
+    websocket.onerror = (event) => {
+      console.error("Deepgram websocket error", {
+        tabId: session.tabId,
+        model: session.model || DEFAULT_MODEL,
+        sampleRate: session.currentSampleRate,
+        event
+      });
       reject(new Error("Deepgram WebSocket connection failed"));
     };
 
-    websocket.onclose = async () => {
+    websocket.onclose = async (event) => {
+      console.warn("Deepgram websocket closed", {
+        tabId: session.tabId,
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean
+      });
+
       if (session.stopping) {
         return;
       }

@@ -35,6 +35,16 @@
         color: #f9fafb;
       }
 
+      select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid #374151;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #f9fafb;
+      }
+
       button {
         width: 100%;
         margin-top: 12px;
@@ -80,6 +90,11 @@
     <h1>Real-Time Subtitles</h1>
     <label for="apiKeyInput">Deepgram API key</label>
     <input id="apiKeyInput" type="password" placeholder="Paste your Deepgram API key">
+    <label for="modelSelect" style="margin-top: 12px;">Model</label>
+    <select id="modelSelect">
+      <option value="nova-3-monolingual">nova-3 monolingual</option>
+      <option value="nova-3-multilingual">nova-3 multilingual</option>
+    </select>
     <button id="saveButton" type="button">Save API Key</button>
     <button id="toggleButton" type="button">Start Subtitles</button>
     <div id="warning">Warning: this API key is stored locally inside the extension.</div>
