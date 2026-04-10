@@ -42,12 +42,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  if (!sessions.has(tabId)) {
+  const session = await getSessionState(tabId);
+  if (!session?.active) {
     return;
   }
 
   sessions.delete(tabId);
-  await sendOffscreenMessage({ type: "stop_capture", tabId }).catch(() => {});
+  await sendOffscreenMessage({
+    target: "offscreen",
+    type: "stop_capture",
+    tabId
+  }).catch(() => {});
   await maybeCloseOffscreenDocument();
 });
 
@@ -89,7 +94,7 @@ async function getPopupState(tabId) {
     "deepgramApiKey",
     "deepgramModelPreset"
   ]);
-  const session = sessions.get(tabId);
+  const session = await getSessionState(tabId);
 
   return {
     ok: true,
@@ -119,6 +124,11 @@ async function startSubtitlesForTab(tabId, requestedModelPreset) {
   const { deepgramModelPreset = DEFAULT_MODEL_PRESET } = await chrome.storage.local.get("deepgramModelPreset");
   const modelPreset = requestedModelPreset || deepgramModelPreset || DEFAULT_MODEL_PRESET;
   const modelConfig = resolveModelPreset(modelPreset);
+  const existingSession = await getSessionState(tabId);
+
+  if (existingSession?.active) {
+    return getPopupState(tabId);
+  }
 
   await ensureContentScript(tabId);
   await ensureOffscreenDocument();
@@ -187,12 +197,12 @@ async function stopSubtitlesForTab(tabId) {
     throw new Error("No active tab available");
   }
 
-  sessions.set(tabId, {
-    state: SESSION_STATES.stopped,
-    lastError: ""
-  });
-
-  await sendOffscreenMessage({ type: "stop_capture", tabId }).catch(() => {});
+  const session = await getSessionState(tabId);
+  await sendOffscreenMessage({
+    target: "offscreen",
+    type: "stop_capture",
+    tabId
+  }).catch(() => {});
   await sendTabMessage(tabId, { type: "subtitle_clear" }).catch(() => {});
   sessions.delete(tabId);
   await maybeCloseOffscreenDocument();
@@ -202,7 +212,7 @@ async function stopSubtitlesForTab(tabId) {
     apiKeySaved: true,
     active: false,
     state: SESSION_STATES.idle,
-    error: ""
+    error: session?.lastError || ""
   };
 }
 
@@ -235,6 +245,62 @@ async function relayToTab(message) {
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error.message || "Failed to message tab" };
+  }
+}
+
+async function getSessionState(tabId) {
+  let session = sessions.get(tabId);
+  if (session) {
+    return {
+      active: session.state === SESSION_STATES.listening || session.state === SESSION_STATES.reconnecting,
+      state: session.state,
+      lastError: session.lastError || ""
+    };
+  }
+
+  const offscreenSession = await getOffscreenSessionState(tabId);
+  if (!offscreenSession) {
+    return null;
+  }
+
+  session = {
+    state: offscreenSession.state || SESSION_STATES.idle,
+    lastError: offscreenSession.lastError || ""
+  };
+
+  if (session.state === SESSION_STATES.stopped) {
+    sessions.delete(tabId);
+  } else {
+    sessions.set(tabId, session);
+  }
+
+  return {
+    active: Boolean(offscreenSession.active),
+    state: session.state,
+    lastError: session.lastError
+  };
+}
+
+async function getOffscreenSessionState(tabId) {
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+    documentUrls: [OFFSCREEN_URL]
+  });
+
+  if (existingContexts.length === 0) {
+    return null;
+  }
+
+  try {
+    const response = await sendOffscreenMessage({
+      target: "offscreen",
+      type: "get_session_state",
+      tabId
+    });
+    return response?.ok ? response : null;
+  } catch (error) {
+    console.warn("Failed to read offscreen session state", error);
+    return null;
   }
 }
 
@@ -279,16 +345,26 @@ async function ensureOffscreenDocument() {
 }
 
 async function maybeCloseOffscreenDocument() {
-  if (sessions.size > 0) {
-    return;
-  }
-
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ["OFFSCREEN_DOCUMENT"],
     documentUrls: [OFFSCREEN_URL]
   });
 
   if (existingContexts.length === 0) {
+    return;
+  }
+
+  try {
+    const response = await sendOffscreenMessage({
+      target: "offscreen",
+      type: "has_active_sessions"
+    });
+
+    if (response?.ok && response.active) {
+      return;
+    }
+  } catch (error) {
+    console.warn("Failed to check offscreen activity before closing document", error);
     return;
   }
 

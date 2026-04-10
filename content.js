@@ -1,13 +1,25 @@
 const OVERLAY_ID = "dg-live-subtitles-overlay";
 const OVERLAY_HANDLE_ID = "dg-live-subtitles-overlay-handle";
 const OVERLAY_CONTENT_ID = "dg-live-subtitles-overlay-content";
+const SNAP_PLACEHOLDER_ID = "dg-live-subtitles-snap-placeholder";
 const OVERLAY_POSITION_STORAGE_KEY = "subtitleOverlayPosition";
 const CLEAR_DELAY_MS = 3000;
 const INTERIM_RENDER_DELAY_MS = 120;
+const DEFAULT_BOTTOM_OFFSET_VH = 6;
+const SNAP_DISTANCE_PX = 36;
+const SNAP_PLACEHOLDER_WIDTH_PX = 520;
+const SNAP_PLACEHOLDER_HEIGHT_PX = 96;
+const SNAP_PLACEHOLDER_IDLE_BORDER = "2px dashed rgba(255, 255, 255, 0.92)";
+const SNAP_PLACEHOLDER_IDLE_BACKGROUND = "rgba(15, 23, 42, 0.22)";
+const SNAP_PLACEHOLDER_ACTIVE_BORDER = "2px solid rgba(96, 165, 250, 0.98)";
+const SNAP_PLACEHOLDER_ACTIVE_BACKGROUND = "rgba(59, 130, 246, 0.22)";
+const OVERLAY_IDLE_BOX_SHADOW = "0 12px 30px rgba(0, 0, 0, 0.35)";
+const OVERLAY_SNAP_BOX_SHADOW = "0 0 0 3px rgba(96, 165, 250, 0.85), 0 16px 36px rgba(37, 99, 235, 0.32)";
 
 let overlayRoot = null;
 let overlayContent = null;
 let overlayHandle = null;
+let snapPlaceholder = null;
 let finalLine = "";
 let liveTail = "";
 let pendingInterimText = "";
@@ -16,6 +28,7 @@ let interimRenderTimer = null;
 let overlayPosition = null;
 let overlayPositionLoadPromise = null;
 let dragState = null;
+let snapActive = false;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message?.type) {
@@ -46,6 +59,7 @@ function ensureOverlay() {
   if (overlayRoot) {
     overlayHandle = overlayRoot.querySelector(`#${OVERLAY_HANDLE_ID}`);
     overlayContent = overlayRoot.querySelector(`#${OVERLAY_CONTENT_ID}`);
+    snapPlaceholder = document.getElementById(SNAP_PLACEHOLDER_ID);
     return overlayRoot;
   }
 
@@ -81,7 +95,35 @@ function ensureOverlay() {
   overlayContent.style.pointerEvents = "none";
   overlayContent.style.whiteSpace = "pre-wrap";
   overlayContent.style.wordBreak = "break-word";
-  overlayContent.style.boxShadow = "0 12px 30px rgba(0, 0, 0, 0.35)";
+  overlayContent.style.boxShadow = OVERLAY_IDLE_BOX_SHADOW;
+  overlayContent.style.transition = "box-shadow 120ms ease, transform 120ms ease";
+
+  snapPlaceholder = document.createElement("div");
+  snapPlaceholder.id = SNAP_PLACEHOLDER_ID;
+  snapPlaceholder.style.position = "fixed";
+  snapPlaceholder.style.width = `${SNAP_PLACEHOLDER_WIDTH_PX}px`;
+  snapPlaceholder.style.height = `${SNAP_PLACEHOLDER_HEIGHT_PX}px`;
+  snapPlaceholder.style.border = SNAP_PLACEHOLDER_IDLE_BORDER;
+  snapPlaceholder.style.borderRadius = "16px";
+  snapPlaceholder.style.background = SNAP_PLACEHOLDER_IDLE_BACKGROUND;
+  snapPlaceholder.style.boxSizing = "border-box";
+  snapPlaceholder.style.pointerEvents = "none";
+  snapPlaceholder.style.display = "none";
+  snapPlaceholder.style.zIndex = "999998";
+  snapPlaceholder.style.boxShadow = "0 0 0 1px rgba(15, 23, 42, 0.45), 0 12px 32px rgba(0, 0, 0, 0.28)";
+  snapPlaceholder.style.backdropFilter = "blur(2px)";
+  snapPlaceholder.style.alignItems = "center";
+  snapPlaceholder.style.justifyContent = "center";
+  snapPlaceholder.style.color = "rgba(255, 255, 255, 0.94)";
+  snapPlaceholder.style.fontFamily = "'Segoe UI', Arial, sans-serif";
+  snapPlaceholder.style.fontSize = "14px";
+  snapPlaceholder.style.fontWeight = "600";
+  snapPlaceholder.style.letterSpacing = "0.04em";
+  snapPlaceholder.style.textTransform = "uppercase";
+  snapPlaceholder.style.display = "none";
+  snapPlaceholder.style.opacity = "0";
+  snapPlaceholder.style.transition = "opacity 120ms ease, border-color 120ms ease, background 120ms ease, box-shadow 120ms ease";
+  snapPlaceholder.textContent = "Snap Here";
 
   overlayRoot.appendChild(overlayHandle);
   overlayRoot.appendChild(overlayContent);
@@ -97,6 +139,7 @@ function ensureOverlay() {
     }
   }).catch(() => {});
 
+  document.documentElement.appendChild(snapPlaceholder);
   document.documentElement.appendChild(overlayRoot);
   return overlayRoot;
 }
@@ -262,7 +305,7 @@ function applyDefaultOverlayPosition() {
 
   overlayRoot.style.left = "50%";
   overlayRoot.style.top = "auto";
-  overlayRoot.style.bottom = "6vh";
+  overlayRoot.style.bottom = `${DEFAULT_BOTTOM_OFFSET_VH}vh`;
   overlayRoot.style.transform = "translateX(-50%)";
 }
 
@@ -304,6 +347,7 @@ async function loadOverlayPosition() {
 
 async function saveOverlayPosition() {
   if (!overlayPosition) {
+    await chrome.storage.local.remove(OVERLAY_POSITION_STORAGE_KEY);
     return;
   }
 
@@ -326,6 +370,8 @@ function startDrag(event) {
     top: rect.top
   };
 
+  showSnapPlaceholder();
+  setSnapActive(false);
   overlayHandle?.setPointerCapture?.(event.pointerId);
   event.preventDefault();
 }
@@ -346,6 +392,15 @@ function handleDrag(event) {
     Math.max(12, window.innerHeight - overlayRoot.offsetHeight - 12)
   );
 
+  const shouldSnap = isNearDefaultOverlayPosition(nextLeft, nextTop);
+  setSnapActive(shouldSnap);
+
+  if (shouldSnap) {
+    overlayPosition = null;
+    applyDefaultOverlayPosition();
+    return;
+  }
+
   overlayPosition = { left: nextLeft, top: nextTop };
   applyOverlayPosition();
 }
@@ -356,9 +411,91 @@ function endDrag(event) {
   }
 
   dragState = null;
+  setSnapActive(false);
+  hideSnapPlaceholder();
   saveOverlayPosition().catch(() => {});
 }
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function isNearDefaultOverlayPosition(left, top) {
+  if (!overlayRoot) {
+    return false;
+  }
+
+  const defaultRect = getDefaultOverlayRect();
+  const deltaX = left - defaultRect.left;
+  const deltaY = top - defaultRect.top;
+  return Math.hypot(deltaX, deltaY) <= SNAP_DISTANCE_PX;
+}
+
+function getDefaultOverlayRect() {
+  const bottomOffset = (window.innerHeight * DEFAULT_BOTTOM_OFFSET_VH) / 100;
+  const left = (window.innerWidth - overlayRoot.offsetWidth) / 2;
+  const top = window.innerHeight - bottomOffset - overlayRoot.offsetHeight;
+
+  return {
+    left,
+    top
+  };
+}
+
+function showSnapPlaceholder() {
+  if (!snapPlaceholder) {
+    return;
+  }
+
+  const rect = getSnapPlaceholderRect();
+  setSnapActive(snapActive);
+  snapPlaceholder.style.left = `${Math.round(rect.left)}px`;
+  snapPlaceholder.style.top = `${Math.round(rect.top)}px`;
+  snapPlaceholder.style.display = "flex";
+  requestAnimationFrame(() => {
+    if (snapPlaceholder) {
+      snapPlaceholder.style.opacity = "1";
+    }
+  });
+}
+
+function hideSnapPlaceholder() {
+  if (!snapPlaceholder) {
+    return;
+  }
+
+  snapPlaceholder.style.opacity = "0";
+  snapPlaceholder.style.display = "none";
+}
+
+function getSnapPlaceholderRect() {
+  const bottomOffset = (window.innerHeight * DEFAULT_BOTTOM_OFFSET_VH) / 100;
+  const width = Math.min(SNAP_PLACEHOLDER_WIDTH_PX, window.innerWidth - 24);
+  const height = SNAP_PLACEHOLDER_HEIGHT_PX;
+  const left = Math.max(12, (window.innerWidth - width) / 2);
+  const top = Math.max(12, window.innerHeight - bottomOffset - height);
+
+  snapPlaceholder.style.width = `${Math.round(width)}px`;
+
+  return {
+    left,
+    top
+  };
+}
+
+function setSnapActive(active) {
+  snapActive = active;
+
+  if (snapPlaceholder) {
+    snapPlaceholder.style.border = active ? SNAP_PLACEHOLDER_ACTIVE_BORDER : SNAP_PLACEHOLDER_IDLE_BORDER;
+    snapPlaceholder.style.background = active ? SNAP_PLACEHOLDER_ACTIVE_BACKGROUND : SNAP_PLACEHOLDER_IDLE_BACKGROUND;
+    snapPlaceholder.style.boxShadow = active
+      ? "0 0 0 2px rgba(96, 165, 250, 0.35), 0 14px 36px rgba(37, 99, 235, 0.28)"
+      : "0 0 0 1px rgba(15, 23, 42, 0.45), 0 12px 32px rgba(0, 0, 0, 0.28)";
+  }
+
+  if (overlayContent) {
+    overlayContent.style.boxShadow = active ? OVERLAY_SNAP_BOX_SHADOW : OVERLAY_IDLE_BOX_SHADOW;
+    overlayContent.style.transform = active ? "translateY(-1px)" : "none";
+  }
 }

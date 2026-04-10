@@ -28,6 +28,13 @@ async function handleRuntimeMessage(message) {
     case "stop_capture":
       await stopCapture(message.tabId, { notifyStopped: true });
       return { ok: true };
+    case "get_session_state":
+      return getSessionState(message.tabId);
+    case "has_active_sessions":
+      return {
+        ok: true,
+        active: sessions.size > 0
+      };
     default:
       return { ok: false, error: "Unsupported offscreen message" };
   }
@@ -412,6 +419,38 @@ async function stopCapture(tabId, { notifyStopped }) {
     await sendSubtitleEvent(tabId, { type: "subtitle_clear" }).catch(() => {});
     await notifyBackground(tabId, "stopped");
   }
+}
+
+function getSessionState(tabId) {
+  const session = sessions.get(tabId);
+  const state = deriveSessionState(session);
+
+  return {
+    ok: true,
+    active: state === "listening" || state === "reconnecting",
+    state,
+    lastError: session?.lastError || ""
+  };
+}
+
+function deriveSessionState(session) {
+  if (!session) {
+    return "idle";
+  }
+
+  if (session.stopping) {
+    return "stopped";
+  }
+
+  if (session.reconnectTimer || session.websocket?.readyState === WebSocket.CONNECTING) {
+    return "reconnecting";
+  }
+
+  if (session.websocket?.readyState === WebSocket.OPEN) {
+    return "listening";
+  }
+
+  return "starting";
 }
 
 function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
