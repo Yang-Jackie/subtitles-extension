@@ -78,6 +78,7 @@ function ensureOverlay() {
   overlayHandle.style.marginBottom = "-6px";
   overlayHandle.style.cursor = "move";
   overlayHandle.style.pointerEvents = "auto";
+  overlayHandle.style.touchAction = "none";
   overlayHandle.style.background = "transparent";
   overlayHandle.title = "Drag subtitle overlay";
   overlayHandle.addEventListener("pointerdown", startDrag);
@@ -92,11 +93,16 @@ function ensureOverlay() {
   overlayContent.style.fontSize = "24px";
   overlayContent.style.lineHeight = "1.35";
   overlayContent.style.textAlign = "center";
-  overlayContent.style.pointerEvents = "none";
+  overlayContent.style.pointerEvents = "auto";
+  overlayContent.style.cursor = "move";
+  overlayContent.style.userSelect = "none";
+  overlayContent.style.touchAction = "none";
   overlayContent.style.whiteSpace = "pre-wrap";
   overlayContent.style.wordBreak = "break-word";
   overlayContent.style.boxShadow = OVERLAY_IDLE_BOX_SHADOW;
   overlayContent.style.transition = "box-shadow 120ms ease, transform 120ms ease";
+  overlayContent.title = "Drag subtitle overlay";
+  overlayContent.addEventListener("pointerdown", startDrag);
 
   snapPlaceholder = document.createElement("div");
   snapPlaceholder.id = SNAP_PLACEHOLDER_ID;
@@ -357,13 +363,14 @@ async function saveOverlayPosition() {
 }
 
 function startDrag(event) {
-  if (!overlayRoot) {
+  if (!overlayRoot || event.button !== 0) {
     return;
   }
 
   const rect = overlayRoot.getBoundingClientRect();
   dragState = {
     pointerId: event.pointerId,
+    captureElement: event.currentTarget,
     startX: event.clientX,
     startY: event.clientY,
     left: rect.left,
@@ -372,7 +379,7 @@ function startDrag(event) {
 
   showSnapPlaceholder();
   setSnapActive(false);
-  overlayHandle?.setPointerCapture?.(event.pointerId);
+  event.currentTarget?.setPointerCapture?.(event.pointerId);
   event.preventDefault();
 }
 
@@ -410,6 +417,11 @@ function endDrag(event) {
     return;
   }
 
+  const captureElement = dragState.captureElement;
+  if (captureElement?.hasPointerCapture?.(event.pointerId)) {
+    captureElement.releasePointerCapture(event.pointerId);
+  }
+
   dragState = null;
   setSnapActive(false);
   hideSnapPlaceholder();
@@ -426,8 +438,12 @@ function isNearDefaultOverlayPosition(left, top) {
   }
 
   const defaultRect = getDefaultOverlayRect();
-  const deltaX = left - defaultRect.left;
-  const deltaY = top - defaultRect.top;
+  const nextCenterX = left + (overlayRoot.offsetWidth / 2);
+  const nextCenterY = top + (overlayRoot.offsetHeight / 2);
+  const defaultCenterX = defaultRect.left + (overlayRoot.offsetWidth / 2);
+  const defaultCenterY = defaultRect.top + (overlayRoot.offsetHeight / 2);
+  const deltaX = nextCenterX - defaultCenterX;
+  const deltaY = nextCenterY - defaultCenterY;
   return Math.hypot(deltaX, deltaY) <= SNAP_DISTANCE_PX;
 }
 
