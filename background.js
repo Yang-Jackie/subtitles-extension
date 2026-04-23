@@ -50,7 +50,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   const session = await getSessionState(tabId);
-  if (!session?.active) {
+  if (!session?.canStop && !session?.hasRuntimeSession) {
     return;
   }
 
@@ -149,6 +149,27 @@ async function getPopupState(tabId) {
   };
 }
 
+async function getIdlePopupState(error = "") {
+  const { deepgramApiKey = "", deepgramModelPreset = DEFAULT_MODEL_PRESET } = await chrome.storage.local.get([
+    "deepgramApiKey",
+    "deepgramModelPreset"
+  ]);
+
+  return {
+    ok: true,
+    apiKeySaved: Boolean(deepgramApiKey),
+    modelPreset: deepgramModelPreset,
+    active: false,
+    hasSession: false,
+    hasRuntimeSession: false,
+    canStop: false,
+    captureState: SESSION_STATES.idle,
+    state: SESSION_STATES.idle,
+    pageState: PAGE_STATES.unknown,
+    error
+  };
+}
+
 async function startSubtitlesForTab(tabId, requestedModelPreset) {
   if (!tabId) {
     throw new Error("No active tab available");
@@ -244,6 +265,12 @@ async function stopSubtitlesForTab(tabId) {
   }
 
   const session = await getSessionState(tabId);
+  if (!session?.canStop && !session?.hasRuntimeSession) {
+    await sendTabMessage(tabId, { type: "subtitle_clear" }).catch(() => {});
+    await maybeCloseOffscreenDocument();
+    return getIdlePopupState(session?.lastError || "");
+  }
+
   const cachedSession = sessions.get(tabId);
   if (cachedSession) {
     cachedSession.state = SESSION_STATES.stopping;
@@ -259,13 +286,7 @@ async function stopSubtitlesForTab(tabId) {
   sessions.delete(tabId);
   await maybeCloseOffscreenDocument();
 
-  return {
-    ok: true,
-    apiKeySaved: true,
-    active: false,
-    state: SESSION_STATES.idle,
-    error: session?.lastError || ""
-  };
+  return getIdlePopupState(session?.lastError || "");
 }
 
 async function updateSessionStatus(message) {
