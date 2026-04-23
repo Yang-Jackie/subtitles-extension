@@ -140,7 +140,9 @@ async function getPopupState(tabId) {
     modelPreset: deepgramModelPreset,
     active: isActiveCaptureState(session?.state),
     hasSession: Boolean(session?.hasSession),
+    hasRuntimeSession: Boolean(session?.hasRuntimeSession),
     canStop: Boolean(session?.canStop),
+    captureState: session?.captureState || session?.state || SESSION_STATES.idle,
     state: session?.state || SESSION_STATES.idle,
     pageState: session?.pageState || PAGE_STATES.unknown,
     error: session?.lastError || ""
@@ -305,11 +307,16 @@ async function getSessionState(tabId) {
 
   if (offscreenSession) {
     const offscreenState = offscreenSession.state || SESSION_STATES.idle;
-    const offscreenHasSession = Boolean(offscreenSession.hasSession || offscreenSession.active);
+    const offscreenHasRuntimeSession = Boolean(
+      offscreenSession.hasRuntimeSession ||
+      offscreenSession.hasSession ||
+      offscreenSession.active
+    );
 
-    if (offscreenHasSession || isStopCapableState(offscreenState)) {
+    if (offscreenHasRuntimeSession) {
       const session = {
         state: offscreenState,
+        hasRuntimeSession: true,
         lastError: offscreenSession.lastError || cachedSession?.lastError || "",
         pageState: cachedSession?.pageState || PAGE_STATES.unknown
       };
@@ -317,13 +324,22 @@ async function getSessionState(tabId) {
       return normalizeSessionState(session);
     }
 
-    if (!cachedSession || !isTransientLocalState(cachedSession.state)) {
+    if (!cachedSession || !isLocalTransitionState(cachedSession.state)) {
       sessions.delete(tabId);
       return null;
     }
   }
 
-  return cachedSession ? normalizeSessionState(cachedSession) : null;
+  if (!cachedSession) {
+    return null;
+  }
+
+  if (!isLocalTransitionState(cachedSession.state)) {
+    sessions.delete(tabId);
+    return null;
+  }
+
+  return normalizeSessionState(cachedSession);
 }
 
 async function getOffscreenSessionState(tabId) {
@@ -438,12 +454,16 @@ function resolveModelPreset(modelPreset) {
 
 function normalizeSessionState(session) {
   const state = session?.state || SESSION_STATES.idle;
-  const canStop = isStopCapableState(state);
+  const hasRuntimeSession = Boolean(session?.hasRuntimeSession);
+  const hasLocalTransition = isLocalTransitionState(state);
+  const canStop = hasRuntimeSession || hasLocalTransition;
 
   return {
     active: isActiveCaptureState(state),
     hasSession: canStop,
+    hasRuntimeSession,
     canStop,
+    captureState: state,
     state,
     pageState: session?.pageState || PAGE_STATES.unknown,
     lastError: session?.lastError || ""
@@ -454,16 +474,6 @@ function isActiveCaptureState(state) {
   return state === SESSION_STATES.listening || state === SESSION_STATES.reconnecting;
 }
 
-function isStopCapableState(state) {
-  return (
-    state === SESSION_STATES.starting ||
-    state === SESSION_STATES.listening ||
-    state === SESSION_STATES.reconnecting ||
-    state === SESSION_STATES.stopping ||
-    state === SESSION_STATES.error
-  );
-}
-
-function isTransientLocalState(state) {
+function isLocalTransitionState(state) {
   return state === SESSION_STATES.starting || state === SESSION_STATES.stopping;
 }

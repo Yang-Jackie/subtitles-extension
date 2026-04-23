@@ -430,7 +430,9 @@ function getSessionState(tabId) {
     ok: true,
     active: state === "listening" || state === "reconnecting",
     hasSession,
+    hasRuntimeSession: hasSession,
     canStop: hasSession,
+    captureState: state,
     state,
     lastError: session?.lastError || ""
   };
