@@ -1,6 +1,5 @@
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const OFFSCREEN_URL = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
-const DEFAULT_LANGUAGE = "en";
 const DEFAULT_MODEL_PRESET = "nova-3-monolingual";
 const MODEL_PRESETS = {
   "nova-3-monolingual": {
@@ -230,9 +229,8 @@ async function startSubtitlesForTab(tabId, requestedModelPreset) {
     tabId,
     streamId,
     apiKey: deepgramApiKey,
-    language: DEFAULT_LANGUAGE,
-    modelPreset,
-    modelConfig
+    language: modelConfig.language,
+    model: modelConfig.model
   });
 
   if (!response?.ok) {
