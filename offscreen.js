@@ -424,10 +424,13 @@ async function stopCapture(tabId, { notifyStopped }) {
 function getSessionState(tabId) {
   const session = sessions.get(tabId);
   const state = deriveSessionState(session);
+  const hasSession = Boolean(session && state !== "stopped" && state !== "idle");
 
   return {
     ok: true,
     active: state === "listening" || state === "reconnecting",
+    hasSession,
+    canStop: hasSession,
     state,
     lastError: session?.lastError || ""
   };

@@ -6,6 +6,7 @@ const statusNode = document.getElementById("status");
 
 let currentTabId = null;
 let currentState = "idle";
+let currentCanStop = false;
 
 document.addEventListener("DOMContentLoaded", initializePopup);
 saveButton.addEventListener("click", saveApiKey);
@@ -78,7 +79,7 @@ async function toggleSubtitles() {
     return;
   }
 
-  if (currentState === "listening" || currentState === "reconnecting") {
+  if (currentCanStop) {
     await chrome.runtime.sendMessage({
       target: "background",
       type: "stop_subtitles",
@@ -107,14 +108,27 @@ async function toggleSubtitles() {
 function renderState(response) {
   const apiKeySaved = Boolean(response?.apiKeySaved);
   const active = Boolean(response?.active);
+  const canStop = Boolean(response?.canStop || response?.hasSession);
+  const pageState = response?.pageState || "unknown";
   currentState = response?.state || "idle";
+  currentCanStop = canStop;
 
-  toggleButton.disabled = !apiKeySaved || !currentTabId;
-  toggleButton.textContent = active ? "Stop Subtitles" : "Start Subtitles";
-  toggleButton.classList.toggle("stop", active);
+  toggleButton.disabled = (!apiKeySaved && !canStop) || !currentTabId;
+  toggleButton.textContent = canStop ? "Stop Subtitles" : "Start Subtitles";
+  toggleButton.classList.toggle("stop", canStop);
 
-  if (!apiKeySaved) {
+  if (!apiKeySaved && !canStop) {
     statusNode.textContent = "Save a Deepgram API key before starting subtitles.";
+    return;
+  }
+
+  if (canStop && pageState === "loading") {
+    statusNode.textContent = "Page is reloading; subtitles remain active.";
+    return;
+  }
+
+  if (canStop && pageState === "content_missing") {
+    statusNode.textContent = "Subtitles are active, but the overlay cannot attach to this page.";
     return;
   }
 
@@ -132,7 +146,7 @@ function renderState(response) {
       statusNode.textContent = response?.error || "An error occurred.";
       break;
     default:
-      statusNode.textContent = active ? "Subtitles active." : "Ready.";
+      statusNode.textContent = active || canStop ? "Subtitles active." : "Ready.";
       break;
   }
 }
