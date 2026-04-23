@@ -2,7 +2,7 @@ const DEEPGRAM_BASE_URL = "wss://api.deepgram.com/v1/listen";
 const DEFAULT_MODEL = "nova-3";
 const TARGET_SAMPLE_RATE = 16000;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
-const DEBUG_DEEPGRAM = true;
+const DEBUG_DEEPGRAM = false;
 const sessions = new Map();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -43,31 +43,45 @@ async function handleRuntimeMessage(message) {
 async function startCapture({ tabId, streamId, apiKey, language, model }) {
   await stopCapture(tabId, { notifyStopped: false });
 
-  const mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      mandatory: {
-        chromeMediaSource: "tab",
-        chromeMediaSourceId: streamId
-      }
-    },
-    video: false
-  });
+  let mediaStream = null;
+  let session = null;
 
-  const audioTracks = mediaStream.getAudioTracks();
-  if (audioTracks.length === 0) {
-    throw new Error("No audio track available from captured tab");
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        mandatory: {
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: streamId
+        }
+      },
+      video: false
+    });
+
+    const audioTracks = mediaStream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      throw new Error("No audio track available from captured tab");
+    }
+
+    session = createSession({
+      tabId,
+      apiKey,
+      language,
+      model,
+      mediaStream
+    });
+
+    sessions.set(tabId, session);
+    await session.initPromise;
+  } catch (error) {
+    if (session && sessions.get(tabId) === session) {
+      await stopCapture(tabId, { notifyStopped: false });
+    } else {
+      mediaStream?.getTracks().forEach((track) => track.stop());
+      sessions.delete(tabId);
+    }
+
+    throw error;
   }
-
-  const session = createSession({
-    tabId,
-    apiKey,
-    language,
-    model,
-    mediaStream
-  });
-
-  sessions.set(tabId, session);
-  await session.initPromise;
 }
 
 function createSession({ tabId, apiKey, language, model, mediaStream }) {
@@ -85,6 +99,7 @@ function createSession({ tabId, apiKey, language, model, mediaStream }) {
     websocket: null,
     reconnectAttempt: 0,
     reconnectTimer: null,
+    lastError: "",
     stopping: false,
     currentSampleRate: 48000,
     pcmQueue: [],
@@ -225,6 +240,7 @@ async function openDeepgramWebSocket(session) {
         model: session.model || DEFAULT_MODEL,
         sampleRate: session.currentSampleRate
       });
+      session.lastError = "";
       session.reconnectAttempt = 0;
       resolve();
     };
@@ -294,6 +310,7 @@ function handleDeepgramMessage(session, rawMessage) {
 
   if (payload.type === "Error") {
     const errorMessage = payload.description || payload.message || "Deepgram error";
+    session.lastError = errorMessage;
     sendSubtitleEvent(session.tabId, {
       type: "subtitle_update",
       text: "",
@@ -449,6 +466,10 @@ function deriveSessionState(session) {
 
   if (session.reconnectTimer || session.websocket?.readyState === WebSocket.CONNECTING) {
     return "reconnecting";
+  }
+
+  if (session.lastError) {
+    return "error";
   }
 
   if (session.websocket?.readyState === WebSocket.OPEN) {
