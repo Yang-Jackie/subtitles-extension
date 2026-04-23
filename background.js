@@ -190,7 +190,7 @@ async function startSubtitlesForTab(tabId, requestedModelPreset) {
   const modelConfig = resolveModelPreset(modelPreset);
   const existingSession = await getSessionState(tabId);
 
-  if (existingSession?.active) {
+  if (existingSession?.canStop || existingSession?.hasRuntimeSession) {
     return getPopupState(tabId);
   }
 
@@ -214,11 +214,7 @@ async function startSubtitlesForTab(tabId, requestedModelPreset) {
   try {
     streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   } catch (error) {
-    sessions.set(tabId, {
-      state: SESSION_STATES.error,
-      lastError: "Failed to capture tab audio",
-      pageState: PAGE_STATES.ready
-    });
+    sessions.delete(tabId);
     await sendTabMessage(tabId, {
       type: "subtitle_update",
       text: "",
@@ -240,11 +236,7 @@ async function startSubtitlesForTab(tabId, requestedModelPreset) {
   });
 
   if (!response?.ok) {
-    sessions.set(tabId, {
-      state: SESSION_STATES.error,
-      lastError: response?.error || "Failed to start subtitle capture",
-      pageState: PAGE_STATES.ready
-    });
+    sessions.delete(tabId);
 
     await sendTabMessage(tabId, {
       type: "subtitle_update",
