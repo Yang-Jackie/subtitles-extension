@@ -8,8 +8,8 @@ A Chrome extension that captures audio from the active browser tab, streams it t
 - Streams audio to Deepgram over WebSocket
 - Displays interim and final subtitle text as an on-page overlay
 - Keeps tab audio audible while capture is active
-- Stores the Deepgram API key and model preset locally in Chrome extension storage
-- Supports `nova-3` monolingual and multilingual presets
+- Stores the Deepgram API key and selected language locally in Chrome extension storage
+- Uses `nova-3` with selectable languages: English, Mandarin (Simplified), Mandarin (Traditional), and Vietnamese
 - Lets you drag the whole subtitle overlay and snap it back to the default bottom-center position
 - Keeps the stop button in sync across page reloads and service worker lifecycle changes
 
@@ -17,7 +17,7 @@ A Chrome extension that captures audio from the active browser tab, streams it t
 
 The extension uses a Manifest V3 service worker plus an offscreen document:
 
-1. The popup saves your Deepgram API key and model preset, then starts or stops subtitle capture.
+1. The popup saves your Deepgram API key and selected language, then starts or stops subtitle capture.
 2. The background service worker requests a tab audio stream ID with `chrome.tabCapture`.
 3. The offscreen document opens the tab audio stream, runs an `AudioWorklet`, converts audio to mono PCM, downsamples to `16 kHz`, and sends `linear16` frames to Deepgram.
 4. Transcript updates are relayed back through the background worker to the content script.
@@ -45,7 +45,7 @@ No build step is required. This repo is plain HTML and JavaScript.
 1. Open a normal `http` or `https` page that is playing audio.
 2. Click the extension icon.
 3. Paste your Deepgram API key.
-4. Select a model preset.
+4. Select a language.
 5. Click **Save API Key**.
 6. Click **Start Subtitles**.
 
@@ -65,10 +65,12 @@ The extension requests these permissions in [`manifest.json`](/d:/001-Code/Dev/s
 
 Host permissions allow access to Deepgram plus standard web pages so the content script can run and subtitles can be shown.
 
-## Model Presets
+## Language Options
 
-- `nova-3 monolingual`: sends `model=nova-3` and `language=en`
-- `nova-3 multilingual`: sends `model=nova-3` and `language=multi`
+- `English`: sends `model=nova-3` and `language=en`
+- `Mandarin (Simplified)`: sends `model=nova-3` and `language=zh-CN`
+- `Mandarin (Traditional)`: sends `model=nova-3` and `language=zh-TW`
+- `Vietnamese`: sends `model=nova-3` and `language=vi`
 
 ## Project Structure
 
@@ -85,7 +87,7 @@ Host permissions allow access to Deepgram plus standard web pages so the content
 
 - Only `http` and `https` tabs are capturable.
 - The API key is stored locally in extension storage, not encrypted by this project.
-- Language is currently limited to the two model presets in the popup.
+- Language is currently limited to the four options in the popup.
 - There is no automated test suite or packaging workflow in this repo.
 - If the Deepgram WebSocket disconnects repeatedly, recovery depends on the built-in reconnect loop.
 - Subtitles are transient; there is no transcript history panel yet.

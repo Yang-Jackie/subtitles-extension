@@ -90,10 +90,12 @@
     <h1>Real-Time Subtitles</h1>
     <label for="apiKeyInput">Deepgram API key</label>
     <input id="apiKeyInput" type="password" placeholder="Paste your Deepgram API key">
-    <label for="modelSelect" style="margin-top: 12px;">Model</label>
-    <select id="modelSelect">
-      <option value="nova-3-monolingual">nova-3 monolingual</option>
-      <option value="nova-3-multilingual">nova-3 multilingual</option>
+    <label for="languageSelect" style="margin-top: 12px;">Language</label>
+    <select id="languageSelect">
+      <option value="en">English</option>
+      <option value="zh-CN">Mandarin (Simplified)</option>
+      <option value="zh-TW">Mandarin (Traditional)</option>
+      <option value="vi">Vietnamese</option>
     </select>
     <button id="saveButton" type="button">Save API Key</button>
     <button id="toggleButton" type="button">Start Subtitles</button>

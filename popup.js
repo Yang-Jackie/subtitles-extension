@@ -1,5 +1,5 @@
 const apiKeyInput = document.getElementById("apiKeyInput");
-const modelSelect = document.getElementById("modelSelect");
+const languageSelect = document.getElementById("languageSelect");
 const saveButton = document.getElementById("saveButton");
 const toggleButton = document.getElementById("toggleButton");
 const statusNode = document.getElementById("status");
@@ -16,12 +16,12 @@ async function initializePopup() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab?.id || null;
 
-  const { deepgramApiKey = "", deepgramModelPreset = "nova-3-monolingual" } = await chrome.storage.local.get([
+  const { deepgramApiKey = "", deepgramLanguage = "en" } = await chrome.storage.local.get([
     "deepgramApiKey",
-    "deepgramModelPreset"
+    "deepgramLanguage"
   ]);
   apiKeyInput.value = deepgramApiKey;
-  modelSelect.value = deepgramModelPreset;
+  languageSelect.value = deepgramLanguage;
 
   await refreshState();
 }
@@ -56,7 +56,7 @@ async function refreshState() {
 
 async function saveApiKey() {
   const apiKey = apiKeyInput.value.trim();
-  const modelPreset = modelSelect.value || "nova-3-monolingual";
+  const language = languageSelect.value || "en";
   await chrome.runtime.sendMessage({
     target: "background",
     type: "save_api_key",
@@ -65,11 +65,11 @@ async function saveApiKey() {
 
   await chrome.runtime.sendMessage({
     target: "background",
-    type: "save_model_preset",
-    modelPreset
+    type: "save_language",
+    language
   });
 
-  statusNode.textContent = apiKey ? "API key and model preset saved locally." : "API key cleared.";
+  statusNode.textContent = apiKey ? "API key and language saved locally." : "API key cleared.";
   await refreshState();
 }
 
@@ -94,7 +94,7 @@ async function toggleSubtitles() {
       target: "background",
       type: "start_subtitles",
       tabId: currentTabId,
-      modelPreset: modelSelect.value || "nova-3-monolingual"
+      language: languageSelect.value || "en"
     });
     if (!response?.ok) {
       throw new Error(response?.error || "Failed to start subtitles.");
