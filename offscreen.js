@@ -1,6 +1,8 @@
 const DEEPGRAM_BASE_URL = "wss://api.deepgram.com/v1/listen";
 const DEFAULT_MODEL = "nova-3";
 const TARGET_SAMPLE_RATE = 16000;
+const NO_AUDIO_TIMEOUT_MS = 60000;
+const AUDIO_ACTIVITY_THRESHOLD = 0.002;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 const DEBUG_DEEPGRAM = false;
 const sessions = new Map();
@@ -35,6 +37,13 @@ async function handleRuntimeMessage(message) {
         ok: true,
         active: sessions.size > 0
       };
+    case "list_session_tabs":
+      return {
+        ok: true,
+        tabIds: Array.from(sessions.keys())
+      };
+    case "set_tab_active":
+      return updateTabActivity(message.tabId, message.active, message.inactiveTimeoutMs);
     default:
       return { ok: false, error: "Unsupported offscreen message" };
   }
@@ -100,6 +109,10 @@ function createSession({ tabId, apiKey, language, model, mediaStream }) {
     reconnectAttempt: 0,
     reconnectTimer: null,
     lastError: "",
+    inactiveTimer: null,
+    inactiveTimeoutMs: 0,
+    silenceTimer: null,
+    isTabActive: true,
     stopping: false,
     currentSampleRate: 48000,
     pcmQueue: [],
@@ -108,6 +121,7 @@ function createSession({ tabId, apiKey, language, model, mediaStream }) {
   };
 
   session.initPromise = initializeAudioPipeline(session);
+  scheduleSilenceTimeout(session);
   return session;
 }
 
@@ -139,14 +153,10 @@ async function initializeAudioPipeline(session) {
 
   const audioTrack = session.mediaStream.getAudioTracks()[0];
   audioTrack.addEventListener("ended", () => {
-    sendSubtitleEvent(session.tabId, {
-      type: "subtitle_update",
-      text: "",
-      isFinal: false,
-      status: "Audio stream lost"
-    });
-    notifyBackground(session.tabId, "error", "Audio stream lost");
-    stopCapture(session.tabId, { notifyStopped: true }).catch(() => {});
+    stopCapture(session.tabId, {
+      notifyStopped: true,
+      stopReason: "Audio stream lost"
+    }).catch(() => {});
   });
 
   await openDeepgramWebSocket(session);
@@ -164,7 +174,12 @@ function handleWorkletFrame(session, data) {
     return;
   }
 
-  session.pcmQueue.push(new Float32Array(data.samples));
+  const samples = new Float32Array(data.samples);
+  if (hasAudibleAudio(samples)) {
+    scheduleSilenceTimeout(session);
+  }
+
+  session.pcmQueue.push(samples);
   if (session.flushScheduled) {
     return;
   }
@@ -318,6 +333,10 @@ function handleDeepgramMessage(session, rawMessage) {
       status: errorMessage
     });
     notifyBackground(session.tabId, "error", errorMessage).catch(() => {});
+    stopCapture(session.tabId, {
+      notifyStopped: true,
+      stopReason: errorMessage
+    }).catch(() => {});
     return;
   }
 
@@ -368,17 +387,109 @@ function scheduleReconnect(session) {
   }, delay);
 }
 
-async function stopCapture(tabId, { notifyStopped }) {
+function updateTabActivity(tabId, active, inactiveTimeoutMs = 0) {
+  const session = sessions.get(tabId);
+  if (!session) {
+    return { ok: true };
+  }
+
+  session.isTabActive = Boolean(active);
+  if (Number.isFinite(inactiveTimeoutMs) && inactiveTimeoutMs > 0) {
+    session.inactiveTimeoutMs = inactiveTimeoutMs;
+  }
+
+  if (session.isTabActive) {
+    clearInactiveTimeout(session);
+  } else {
+    scheduleInactiveTimeout(session);
+  }
+
+  return { ok: true };
+}
+
+function scheduleInactiveTimeout(session) {
+  if (session.stopping || session.isTabActive || session.inactiveTimer) {
+    return;
+  }
+
+  const timeoutMs = session.inactiveTimeoutMs || 0;
+  if (timeoutMs <= 0) {
+    return;
+  }
+
+  session.inactiveTimer = setTimeout(() => {
+    session.inactiveTimer = null;
+    if (session.stopping || session.isTabActive) {
+      return;
+    }
+
+    stopCapture(session.tabId, {
+      notifyStopped: true,
+      stopReason: "Stopped after 120 seconds away from the tab"
+    }).catch((error) => {
+      console.warn("Failed to stop capture after tab inactivity", error);
+    });
+  }, timeoutMs);
+}
+
+function clearInactiveTimeout(session) {
+  if (!session.inactiveTimer) {
+    return;
+  }
+
+  clearTimeout(session.inactiveTimer);
+  session.inactiveTimer = null;
+}
+
+function scheduleSilenceTimeout(session) {
+  if (session.stopping) {
+    return;
+  }
+
+  if (session.silenceTimer) {
+    clearTimeout(session.silenceTimer);
+  }
+
+  session.silenceTimer = setTimeout(() => {
+    session.silenceTimer = null;
+    if (session.stopping) {
+      return;
+    }
+
+    stopCapture(session.tabId, {
+      notifyStopped: true,
+      stopReason: "Stopped after 60 seconds without audible audio"
+    }).catch((error) => {
+      console.warn("Failed to stop capture after silence timeout", error);
+    });
+  }, NO_AUDIO_TIMEOUT_MS);
+}
+
+function clearSilenceTimeout(session) {
+  if (!session.silenceTimer) {
+    return;
+  }
+
+  clearTimeout(session.silenceTimer);
+  session.silenceTimer = null;
+}
+
+async function stopCapture(tabId, { notifyStopped, stopReason = "" }) {
   const session = sessions.get(tabId);
   if (!session) {
     return;
   }
 
   session.stopping = true;
+  if (stopReason) {
+    session.lastError = stopReason;
+  }
   if (session.reconnectTimer) {
     clearTimeout(session.reconnectTimer);
     session.reconnectTimer = null;
   }
+  clearInactiveTimeout(session);
+  clearSilenceTimeout(session);
 
   if (session.websocket) {
     try {
@@ -433,8 +544,16 @@ async function stopCapture(tabId, { notifyStopped }) {
   sessions.delete(tabId);
 
   if (notifyStopped) {
+    if (stopReason) {
+      await sendSubtitleEvent(tabId, {
+        type: "subtitle_update",
+        text: "",
+        isFinal: false,
+        status: stopReason
+      }).catch(() => {});
+    }
     await sendSubtitleEvent(tabId, { type: "subtitle_clear" }).catch(() => {});
-    await notifyBackground(tabId, "stopped");
+    await notifyBackground(tabId, "stopped", stopReason);
   }
 }
 
@@ -477,6 +596,16 @@ function deriveSessionState(session) {
   }
 
   return "starting";
+}
+
+function hasAudibleAudio(samples) {
+  for (let i = 0; i < samples.length; i += 1) {
+    if (Math.abs(samples[i]) >= AUDIO_ACTIVITY_THRESHOLD) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {

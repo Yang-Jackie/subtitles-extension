@@ -1,5 +1,6 @@
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const OFFSCREEN_URL = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
+const TAB_INACTIVE_TIMEOUT_MS = 120000;
 const DEFAULT_LANGUAGE = "en";
 const DEEPGRAM_MODEL = "nova-3";
 const SUPPORTED_LANGUAGES = new Set([
@@ -26,6 +27,14 @@ const PAGE_STATES = {
 
 const sessions = new Map();
 let offscreenCreatePromise = null;
+
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  await syncSessionTabActivity(windowId, tabId);
+});
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  await syncSessionTabActivityForFocusedWindow(windowId);
+});
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.target && message.target !== "background") {
@@ -214,6 +223,7 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
       isFinal: false,
       status: "Unable to capture tab audio"
     });
+    await maybeCloseOffscreenDocument();
     throw error;
   }
 
@@ -237,8 +247,11 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
       status: response?.error || "Failed to start subtitle capture"
     }).catch(() => {});
 
+    await maybeCloseOffscreenDocument();
     throw new Error(response?.error || "Failed to start subtitle capture");
   }
+
+  await syncSessionTabActivityForTab(tabId);
 
   return getPopupState(tabId);
 }
@@ -281,7 +294,11 @@ async function updateSessionStatus(message) {
   };
 
   session.state = message.state || session.state;
-  session.lastError = message.error || "";
+  if (typeof message.error === "string" && message.error.length > 0) {
+    session.lastError = message.error;
+  } else if (session.state === SESSION_STATES.listening || session.state === SESSION_STATES.reconnecting || session.state === SESSION_STATES.stopped) {
+    session.lastError = "";
+  }
 
   if (session.state === SESSION_STATES.stopped) {
     sessions.delete(message.tabId);
@@ -370,6 +387,28 @@ async function getOffscreenSessionState(tabId) {
   }
 }
 
+async function getOffscreenSessionTabIds() {
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT"],
+    documentUrls: [OFFSCREEN_URL]
+  });
+
+  if (existingContexts.length === 0) {
+    return [];
+  }
+
+  try {
+    const response = await sendOffscreenMessage({
+      target: "offscreen",
+      type: "list_session_tabs"
+    });
+    return response?.ok && Array.isArray(response.tabIds) ? response.tabIds : [];
+  } catch (error) {
+    console.warn("Failed to read offscreen session tabs", error);
+    return [];
+  }
+}
+
 async function ensureContentScript(tabId) {
   try {
     await sendTabMessage(tabId, { type: "ping" });
@@ -435,6 +474,55 @@ async function maybeCloseOffscreenDocument() {
   }
 
   await chrome.offscreen.closeDocument();
+}
+
+async function syncSessionTabActivity(windowId, activeTabId) {
+  const sessionTabIds = await getOffscreenSessionTabIds();
+  if (sessionTabIds.length === 0) {
+    return;
+  }
+
+  for (const sessionTabId of sessionTabIds) {
+    const active = windowId !== chrome.windows.WINDOW_ID_NONE && sessionTabId === activeTabId;
+    await sendOffscreenMessage({
+      target: "offscreen",
+      type: "set_tab_active",
+      tabId: sessionTabId,
+      active,
+      inactiveTimeoutMs: TAB_INACTIVE_TIMEOUT_MS
+    }).catch(() => {});
+  }
+}
+
+async function syncSessionTabActivityForFocusedWindow(windowId) {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    await syncSessionTabActivity(windowId, null);
+    return;
+  }
+
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, windowId });
+    await syncSessionTabActivity(windowId, activeTab?.id || null);
+  } catch (error) {
+    console.warn("Failed to sync session tab activity", error);
+  }
+}
+
+async function syncSessionTabActivityForTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const focusedWindow = await chrome.windows.getLastFocused();
+    const isFocusedTab = focusedWindow?.id === tab.windowId && tab.active;
+    await sendOffscreenMessage({
+      target: "offscreen",
+      type: "set_tab_active",
+      tabId,
+      active: isFocusedTab,
+      inactiveTimeoutMs: TAB_INACTIVE_TIMEOUT_MS
+    }).catch(() => {});
+  } catch (error) {
+    console.warn("Failed to sync tab activity for session", error);
+  }
 }
 
 function isCapturableUrl(url) {
