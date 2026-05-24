@@ -53,7 +53,7 @@ async function refreshState() {
       apiKeySaved: false,
       captureState: "idle",
       state: "idle",
-      error: "No active tab found"
+      error: reasonCatalog.STATUS.noActiveTab
     });
     return;
   }
@@ -70,7 +70,7 @@ async function refreshState() {
       apiKeySaved: false,
       captureState: "failed",
       state: "failed",
-      error: "Failed to read extension state"
+      error: reasonCatalog.STATUS.failedToReadState
     });
   }
 }
@@ -79,13 +79,13 @@ async function saveSettings() {
   const apiKey = apiKeyInput.value.trim();
   await persistSettings();
 
-  statusNode.textContent = apiKey ? "API key and language saved locally." : "API key cleared.";
+  statusNode.textContent = apiKey ? reasonCatalog.STATUS.settingsSaved : reasonCatalog.STATUS.apiKeyCleared;
   await refreshState();
 }
 
 async function toggleSubtitles() {
   if (!currentTabId) {
-    statusNode.textContent = "No active tab found.";
+    statusNode.textContent = reasonCatalog.STATUS.noActiveTab;
     return;
   }
 
@@ -108,11 +108,11 @@ async function toggleSubtitles() {
       language: languageSelect.value || "en"
     });
     if (!response?.ok) {
-      throw new Error(response?.error || "Failed to start subtitles.");
+      throw new Error(response?.error || reasonCatalog.STATUS.failedToStart);
     }
     await refreshState();
   } catch (error) {
-    statusNode.textContent = error.message || "Failed to start subtitles.";
+    statusNode.textContent = error.message || reasonCatalog.STATUS.failedToStart;
   }
 }
 
@@ -129,7 +129,7 @@ function renderState(response) {
   toggleButton.classList.toggle("stop", canStop);
 
   if (!apiKeySaved && !canStop) {
-    statusNode.textContent = "Save a Deepgram API key before starting subtitles.";
+    statusNode.textContent = reasonCatalog.STATUS.saveApiKey;
     return;
   }
 
@@ -139,33 +139,33 @@ function renderState(response) {
   }
 
   if (canStop && pageState === "loading") {
-    statusNode.textContent = "Page is reloading; subtitles remain active.";
+    statusNode.textContent = reasonCatalog.STATUS.pageReloading;
     return;
   }
 
   if (canStop && pageState === "unavailable") {
-    statusNode.textContent = "Subtitles are active, but the overlay cannot attach to this page.";
+    statusNode.textContent = reasonCatalog.STATUS.overlayUnavailable;
     return;
   }
 
   switch (captureState) {
     case "starting":
-      statusNode.textContent = "Starting capture...";
+      statusNode.textContent = reasonCatalog.STATUS.startingCapture;
       break;
     case "running":
-      statusNode.textContent = "Subtitles are running on this tab.";
+      statusNode.textContent = reasonCatalog.STATUS.running;
       break;
     case "reconnecting":
-      statusNode.textContent = "Reconnecting to Deepgram...";
+      statusNode.textContent = reasonCatalog.STATUS.reconnectingPopup;
       break;
     case "stopping":
-      statusNode.textContent = "Stopping subtitles...";
+      statusNode.textContent = reasonCatalog.STATUS.stoppingSubtitles;
       break;
     case "failed":
-      statusNode.textContent = terminalReason?.message || response?.error || "Subtitle capture failed.";
+      statusNode.textContent = terminalReason?.message || response?.error || reasonCatalog.REASONS.unknown_failure.message;
       break;
     default:
-      statusNode.textContent = canStop ? "Subtitles active." : "Ready.";
+      statusNode.textContent = canStop ? reasonCatalog.STATUS.subtitlesActive : reasonCatalog.STATUS.ready;
       break;
   }
 }

@@ -2,7 +2,6 @@ const DEEPGRAM_BASE_URL = "wss://api.deepgram.com/v1/listen";
 const DEFAULT_MODEL = "nova-3";
 const TARGET_SAMPLE_RATE = 16000;
 const NO_AUDIO_TIMEOUT_MS = 60000;
-const AUDIO_ACTIVITY_THRESHOLD = 0.002;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000];
 const DEBUG_DEEPGRAM = false;
 const sessions = new Map();
@@ -161,7 +160,7 @@ async function initializeAudioPipeline(session) {
   audioTrack.addEventListener("ended", () => {
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: createReason("stream_lost", "Audio stream lost", "runtime"),
+      stopReason: reasonCatalog.createReason("stream_lost", "offscreen"),
       isFailure: true
     }).catch(() => {});
   });
@@ -178,7 +177,7 @@ function handleWorkletFrame(session, data) {
   }
 
   const samples = new Float32Array(data.samples);
-  if (hasAudibleAudio(samples)) {
+  if (audioUtils.hasAudibleAudio(samples)) {
     scheduleSilenceTimeout(session);
   }
 
@@ -217,12 +216,12 @@ function flushPcmQueue(session) {
   }
   session.pcmQueue.length = 0;
 
-  const downsampled = downsampleBuffer(combined, session.currentSampleRate, TARGET_SAMPLE_RATE);
+  const downsampled = audioUtils.downsampleBuffer(combined, session.currentSampleRate, TARGET_SAMPLE_RATE);
   if (downsampled.length === 0) {
     return;
   }
 
-  const linear16 = floatToInt16Buffer(downsampled);
+  const linear16 = audioUtils.floatToInt16Buffer(downsampled);
   session.websocket.send(linear16.buffer);
 }
 
@@ -294,7 +293,7 @@ async function openDeepgramWebSocket(session) {
       }
 
       await notifyBackground(session, "runtime_reconnecting", {
-        reason: createReason("network_reconnect", "Reconnecting to Deepgram", "network")
+        reason: reasonCatalog.createReason("network_reconnect", "offscreen")
       });
 
       scheduleReconnect(session);
@@ -329,11 +328,13 @@ function handleDeepgramMessage(session, rawMessage) {
   }
 
   if (payload.type === "Error") {
-    const errorMessage = payload.description || payload.message || "Deepgram error";
+    const errorMessage = payload.description || payload.message || reasonCatalog.REASONS.deepgram_error.message;
     session.lastError = errorMessage;
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: createReason("deepgram_error", errorMessage, "provider"),
+      stopReason: reasonCatalog.createReason("deepgram_error", "offscreen", {
+        message: errorMessage
+      }),
       isFailure: true
     }).catch(() => {});
     return;
@@ -422,7 +423,7 @@ function scheduleInactiveTimeout(session) {
 
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: createReason("inactive_timeout", "Stopped after 120 seconds away from the tab", "timeout"),
+      stopReason: reasonCatalog.createReason("inactive_timeout", "offscreen"),
       isFailure: false
     }).catch((error) => {
       console.warn("Failed to stop capture after tab inactivity", error);
@@ -456,7 +457,7 @@ function scheduleSilenceTimeout(session) {
 
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: createReason("silence_timeout", "Stopped after 60 seconds without audible audio", "timeout"),
+      stopReason: reasonCatalog.createReason("silence_timeout", "offscreen"),
       isFailure: false
     }).catch((error) => {
       console.warn("Failed to stop capture after silence timeout", error);
@@ -544,7 +545,7 @@ async function stopCapture(tabId, { notifyStopped, stopReason = null, isFailure 
 
   if (notifyStopped) {
     await notifyBackground(session, isFailure ? "runtime_failed" : "runtime_stopped", {
-      reason: stopReason || createReason("user_stop", "Stopped by user", "user")
+      reason: stopReason || reasonCatalog.createReason("user_stop", "offscreen")
     });
   }
 }
@@ -585,82 +586,18 @@ function deriveWebsocketState(session) {
   }
 }
 
-function hasAudibleAudio(samples) {
-  for (let i = 0; i < samples.length; i += 1) {
-    if (Math.abs(samples[i]) >= AUDIO_ACTIVITY_THRESHOLD) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
-  if (outputSampleRate === inputSampleRate) {
-    return buffer;
-  }
-
-  if (outputSampleRate > inputSampleRate) {
-    throw new Error("Output sample rate must be lower than input sample rate");
-  }
-
-  const sampleRateRatio = inputSampleRate / outputSampleRate;
-  const outputLength = Math.round(buffer.length / sampleRateRatio);
-  const result = new Float32Array(outputLength);
-  let outputOffset = 0;
-  let inputOffset = 0;
-
-  while (outputOffset < result.length) {
-    const nextInputOffset = Math.round((outputOffset + 1) * sampleRateRatio);
-    let accum = 0;
-    let count = 0;
-
-    for (let i = inputOffset; i < nextInputOffset && i < buffer.length; i += 1) {
-      accum += buffer[i];
-      count += 1;
-    }
-
-    result[outputOffset] = count > 0 ? accum / count : 0;
-    outputOffset += 1;
-    inputOffset = nextInputOffset;
-  }
-
-  return result;
-}
-
-function floatToInt16Buffer(float32Buffer) {
-  const int16Buffer = new Int16Array(float32Buffer.length);
-
-  for (let i = 0; i < float32Buffer.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, float32Buffer[i]));
-    int16Buffer[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-  }
-
-  return int16Buffer;
-}
-
 function reasonFromCode(code) {
   switch (code) {
     case "tab_closed":
-      return createReason("tab_closed", "Tab closed", "page");
+      return reasonCatalog.createReason("tab_closed", "offscreen");
     case "inactive_timeout":
-      return createReason("inactive_timeout", "Stopped after 120 seconds away from the tab", "timeout");
+      return reasonCatalog.createReason("inactive_timeout", "offscreen");
     case "silence_timeout":
-      return createReason("silence_timeout", "Stopped after 60 seconds without audible audio", "timeout");
+      return reasonCatalog.createReason("silence_timeout", "offscreen");
     case "user_stop":
     default:
-      return createReason("user_stop", "Stopped by user", "user");
+      return reasonCatalog.createReason("user_stop", "offscreen");
   }
-}
-
-function createReason(code, message, category) {
-  return {
-    code,
-    message,
-    category,
-    source: "offscreen",
-    at: Date.now()
-  };
 }
 
 async function notifyBackground(session, type, payload = {}) {

@@ -103,7 +103,7 @@ Host permissions allow access to Deepgram plus standard web pages so the content
   - `node --check popup.js`
   - `node --check content.js`
 - Useful unit test command:
-  - `node --test --test-isolation=none tests\session-state.test.js`
+  - `node --test --test-isolation=none tests\session-state.test.js tests\audio-utils.test.js tests\reason-catalog.test.js`
 
 ## Manual Regression Checklist
 

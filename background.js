@@ -1,4 +1,5 @@
 importScripts("session-state.js");
+importScripts("reason-catalog.js");
 
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const OFFSCREEN_URL = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
@@ -75,7 +76,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
 
   applySessionEvent(tabId, {
     type: "capture_idle",
-    terminalReason: createTerminalReason("tab_closed", "Tab closed", "page", "background")
+    terminalReason: reasonCatalog.createReason("tab_closed", "background")
   });
 
   await sendRuntimeStop(session, "tab_closed").catch(() => {});
@@ -170,13 +171,15 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
     applySessionEvent(tabId, {
       type: "page_state",
       pageState: PAGE_STATES.unavailable,
-      terminalReason: createTerminalReason("unsupported_page", error.message || "Overlay unavailable", "page", "background")
+      terminalReason: reasonCatalog.createReason("unsupported_page", "background", {
+        message: error.message || reasonCatalog.REASONS.unsupported_page.message
+      })
     });
   }
 
   applySessionEvent(tabId, {
     type: "render_status",
-    status: "Starting capture..."
+    status: reasonCatalog.STATUS.startingCapture
   });
 
   let streamId;
@@ -185,7 +188,7 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
   } catch (error) {
     applySessionEvent(tabId, {
       type: "capture_failed",
-      terminalReason: createTerminalReason("capture_denied", "Unable to capture tab audio", "runtime", "background")
+      terminalReason: reasonCatalog.createReason("capture_denied", "background")
     });
     await maybeCloseOffscreenDocument();
     throw error;
@@ -207,12 +210,9 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
   if (!response?.ok) {
     applySessionEvent(tabId, {
       type: "capture_failed",
-      terminalReason: createTerminalReason(
-        "startup_failed",
-        response?.error || "Failed to start subtitle capture",
-        "runtime",
-        "offscreen"
-      )
+      terminalReason: reasonCatalog.createReason("startup_failed", "offscreen", {
+        message: response?.error || reasonCatalog.REASONS.startup_failed.message
+      })
     });
     await maybeCloseOffscreenDocument();
     throw new Error(response?.error || "Failed to start subtitle capture");
@@ -234,7 +234,7 @@ async function stopSubtitlesForTab(tabId) {
     return snapshot;
   }
 
-  const terminalReason = createTerminalReason("user_stop", "Stopped by user", "user", "background");
+  const terminalReason = reasonCatalog.createReason("user_stop", "background");
   applySessionEvent(tabId, {
     type: "capture_stopping",
     terminalReason
@@ -284,7 +284,7 @@ async function handleRuntimeEvent(message) {
         const session = sessions.get(message.tabId);
         const terminalReason = session?.captureState === CAPTURE_STATES.stopping && session.terminalReason
           ? session.terminalReason
-          : normalizeReason(message.reason, "unknown_failure", "Stopped", "runtime", "offscreen");
+          : reasonCatalog.normalizeReason(message.reason, "unknown_failure", "offscreen");
 
         applySessionEvent(message.tabId, {
           type: "capture_idle",
@@ -296,7 +296,7 @@ async function handleRuntimeEvent(message) {
     case "runtime_failed":
       applySessionEvent(message.tabId, {
         type: "capture_failed",
-        terminalReason: normalizeReason(message.reason, "unknown_failure", "Subtitle capture failed", "runtime", "offscreen")
+        terminalReason: reasonCatalog.normalizeReason(message.reason, "unknown_failure", "offscreen")
       });
       await maybeCloseOffscreenDocument();
       break;
@@ -334,12 +334,9 @@ function handleContentUnavailable(message) {
     applySessionEvent(message.tabId, {
       type: "page_state",
       pageState: PAGE_STATES.unavailable,
-      terminalReason: createTerminalReason(
-        "unsupported_page",
-        message.reason || "Overlay unavailable",
-        "page",
-        "content"
-      )
+      terminalReason: reasonCatalog.createReason("unsupported_page", "content", {
+        message: message.reason || reasonCatalog.REASONS.unsupported_page.message
+      })
     });
   }
 
@@ -398,7 +395,7 @@ function applySessionEvent(tabId, event) {
         websocketState: event.runtime?.websocketState || "open",
         lastRuntimeSeenAt: Date.now()
       };
-      session.render = createStatusRender("Listening...");
+      session.render = createStatusRender(reasonCatalog.STATUS.listening);
       break;
     case "capture_reconnecting":
       session.captureState = CAPTURE_STATES.reconnecting;
@@ -409,7 +406,7 @@ function applySessionEvent(tabId, event) {
         websocketState: "closed",
         lastRuntimeSeenAt: Date.now()
       };
-      session.render = createStatusRender("Reconnecting...");
+      session.render = createStatusRender(reasonCatalog.STATUS.reconnecting);
       break;
     case "capture_idle":
       session.desiredActive = false;
@@ -433,7 +430,7 @@ function applySessionEvent(tabId, event) {
         lastRuntimeSeenAt: Date.now()
       };
       session.terminalReason = event.terminalReason || session.terminalReason;
-      session.render = createStatusRender(session.terminalReason?.message || "Subtitle capture failed");
+      session.render = createStatusRender(session.terminalReason?.message || reasonCatalog.REASONS.unknown_failure.message);
       break;
     case "runtime_seen":
       session.runtime = {
@@ -491,7 +488,9 @@ async function reconcileSessionWithRuntime(tabId) {
     if (session.runtime.hasRuntime && isLiveCaptureState(session.captureState)) {
       applySessionEvent(tabId, {
         type: "capture_failed",
-        terminalReason: createTerminalReason("unknown_failure", "Runtime session disappeared", "runtime", "background")
+        terminalReason: reasonCatalog.createReason("unknown_failure", "background", {
+          message: "Runtime session disappeared"
+        })
       });
     }
     return sessions.get(tabId) || null;
@@ -501,7 +500,9 @@ async function reconcileSessionWithRuntime(tabId) {
     if (session.runtime.hasRuntime && isLiveCaptureState(session.captureState)) {
       applySessionEvent(tabId, {
         type: "capture_failed",
-        terminalReason: createTerminalReason("unknown_failure", "Runtime session disappeared", "runtime", "background")
+        terminalReason: reasonCatalog.createReason("unknown_failure", "background", {
+          message: "Runtime session disappeared"
+        })
       });
     }
     return sessions.get(tabId) || null;
@@ -901,34 +902,6 @@ function createCaptionRender(text, isFinal, previousRender) {
     interimText: text || "",
     isFinal: false
   };
-}
-
-function createTerminalReason(code, message, category, source) {
-  return {
-    code,
-    message,
-    category,
-    source,
-    at: Date.now()
-  };
-}
-
-function normalizeReason(reason, defaultCode, defaultMessage, defaultCategory, defaultSource) {
-  if (reason && typeof reason === "object") {
-    return {
-      code: reason.code || defaultCode,
-      message: reason.message || defaultMessage,
-      category: reason.category || defaultCategory,
-      source: reason.source || defaultSource,
-      at: reason.at || Date.now()
-    };
-  }
-
-  if (typeof reason === "string" && reason) {
-    return createTerminalReason(defaultCode, reason, defaultCategory, defaultSource);
-  }
-
-  return createTerminalReason(defaultCode, defaultMessage, defaultCategory, defaultSource);
 }
 
 function isCurrentSessionMessage(message) {
