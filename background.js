@@ -111,22 +111,12 @@ async function handleMessage(message, sender) {
       });
       await broadcastSettingsSnapshots();
       return { ok: true };
-    case "save_api_key":
-      await chrome.storage.local.set({ deepgramApiKey: message.apiKey || "" });
-      await broadcastSettingsSnapshots();
-      return { ok: true };
-    case "save_language":
-      await chrome.storage.local.set({ deepgramLanguage: resolveLanguage(message.language) });
-      await broadcastSettingsSnapshots();
-      return { ok: true };
     case "get_state":
       await reconcileSessionWithRuntime(message.tabId);
       return getPopupState(message.tabId);
     case "session_start":
-    case "start_subtitles":
       return startSubtitlesForTab(message.tabId, message.language);
     case "session_stop":
-    case "stop_subtitles":
       return stopSubtitlesForTab(message.tabId);
     case "runtime_started":
     case "runtime_running":
@@ -141,9 +131,6 @@ async function handleMessage(message, sender) {
       return handleContentUnavailable(message);
     case "render_ack":
       return { ok: true };
-    case "session_status":
-    case "relay_to_tab":
-      return handleLegacyMessage(message);
     default:
       return { ok: false, error: "Unsupported message type" };
   }
@@ -353,43 +340,6 @@ function handleContentUnavailable(message) {
         "page",
         "content"
       )
-    });
-  }
-
-  return { ok: true };
-}
-
-async function handleLegacyMessage(message) {
-  if (message.type === "relay_to_tab") {
-    if (!message.tabId || !message.payload) {
-      return { ok: false, error: "Missing relay target" };
-    }
-
-    try {
-      await sendTabMessage(message.tabId, message.payload);
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error: error.message || "Failed to message tab" };
-    }
-  }
-
-  if (message.type !== "session_status") {
-    return { ok: true };
-  }
-
-  const session = sessions.get(message.tabId);
-  if (!session) {
-    return { ok: true };
-  }
-
-  if (message.state === "listening") {
-    applySessionEvent(message.tabId, { type: "capture_running" });
-  } else if (message.state === "reconnecting") {
-    applySessionEvent(message.tabId, { type: "capture_reconnecting" });
-  } else if (message.state === "error") {
-    applySessionEvent(message.tabId, {
-      type: "capture_failed",
-      terminalReason: createTerminalReason("unknown_failure", message.error || "Subtitle capture failed", "runtime", "offscreen")
     });
   }
 

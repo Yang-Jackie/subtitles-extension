@@ -102,6 +102,23 @@ Host permissions allow access to Deepgram plus standard web pages so the content
   - `node --check offscreen.js`
   - `node --check popup.js`
   - `node --check content.js`
+- Useful unit test command:
+  - `node --test --test-isolation=none tests\session-state.test.js`
+
+## Manual Regression Checklist
+
+Run this checklist after changing session state, message routing, popup behavior, or offscreen capture logic:
+
+1. Reload the unpacked extension from `chrome://extensions` and confirm there are no service worker errors.
+2. Open a normal `http` or `https` tab with audible media.
+3. Open the popup and confirm **Start Subtitles** is enabled when the API key field contains a value.
+4. Start subtitles and confirm the popup moves through starting into a running state.
+5. Confirm the subtitle overlay appears and updates with transcript text.
+6. Reload the page while subtitles are running and confirm the overlay rehydrates.
+7. Switch away from the tab and confirm inactivity handling still stops capture after the configured timeout.
+8. Let audio go silent and confirm silence timeout shows a clear terminal reason.
+9. Stop subtitles manually and confirm the popup returns to idle with the expected terminal reason.
+10. Close a tab while subtitles are running and confirm a new tab can start subtitles afterward.
 
 ## Future Improvements
 

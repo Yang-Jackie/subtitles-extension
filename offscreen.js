@@ -25,11 +25,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleRuntimeMessage(message) {
   switch (message?.type) {
     case "runtime_start":
-    case "start_capture":
       await startCapture(message);
       return { ok: true };
     case "runtime_stop":
-    case "stop_capture":
       await stopCapture(message.tabId, {
         notifyStopped: true,
         stopReason: reasonFromCode(message.reasonCode || "user_stop"),
@@ -37,7 +35,6 @@ async function handleRuntimeMessage(message) {
       });
       return { ok: true };
     case "runtime_get_snapshot":
-    case "get_session_state":
       return getSessionState(message.tabId);
     case "has_active_sessions":
       return {
@@ -45,13 +42,11 @@ async function handleRuntimeMessage(message) {
         active: sessions.size > 0
       };
     case "runtime_list_sessions":
-    case "list_session_tabs":
       return {
         ok: true,
         tabIds: Array.from(sessions.keys())
       };
     case "runtime_set_tab_active":
-    case "set_tab_active":
       return updateTabActivity(message.tabId, message.sessionId, message.active, message.inactiveTimeoutMs);
     default:
       return { ok: false, error: "Unsupported offscreen message" };

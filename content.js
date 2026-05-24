@@ -46,14 +46,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendRenderAck(message);
       sendResponse({ ok: true });
       return false;
-    case "subtitle_update":
-      renderSubtitle(message);
-      sendResponse({ ok: true });
-      return false;
-    case "subtitle_clear":
-      clearSubtitle(true);
-      sendResponse({ ok: true });
-      return false;
     default:
       return false;
   }
