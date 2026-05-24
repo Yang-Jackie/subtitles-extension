@@ -5,11 +5,11 @@ const toggleButton = document.getElementById("toggleButton");
 const statusNode = document.getElementById("status");
 
 let currentTabId = null;
-let currentState = "idle";
-let currentCanStop = false;
+let currentSnapshot = null;
+let popupPort = null;
 
 document.addEventListener("DOMContentLoaded", initializePopup);
-saveButton.addEventListener("click", saveApiKey);
+saveButton.addEventListener("click", saveSettings);
 toggleButton.addEventListener("click", toggleSubtitles);
 
 async function initializePopup() {
@@ -23,14 +23,35 @@ async function initializePopup() {
   apiKeyInput.value = deepgramApiKey;
   languageSelect.value = deepgramLanguage;
 
+  connectPopupPort();
   await refreshState();
+}
+
+function connectPopupPort() {
+  if (!currentTabId) {
+    return;
+  }
+
+  popupPort = chrome.runtime.connect({ name: "popup" });
+  popupPort.onMessage.addListener((message) => {
+    if (message?.type === "session_snapshot") {
+      renderState(message.snapshot);
+    }
+  });
+  popupPort.onDisconnect.addListener(() => {
+    popupPort = null;
+  });
+  popupPort.postMessage({
+    type: "popup_subscribe",
+    tabId: currentTabId
+  });
 }
 
 async function refreshState() {
   if (!currentTabId) {
     renderState({
       apiKeySaved: false,
-      active: false,
+      captureState: "idle",
       state: "idle",
       error: "No active tab found"
     });
@@ -47,27 +68,16 @@ async function refreshState() {
   } catch (error) {
     renderState({
       apiKeySaved: false,
-      active: false,
-      state: "error",
+      captureState: "failed",
+      state: "failed",
       error: "Failed to read extension state"
     });
   }
 }
 
-async function saveApiKey() {
+async function saveSettings() {
   const apiKey = apiKeyInput.value.trim();
-  const language = languageSelect.value || "en";
-  await chrome.runtime.sendMessage({
-    target: "background",
-    type: "save_api_key",
-    apiKey
-  });
-
-  await chrome.runtime.sendMessage({
-    target: "background",
-    type: "save_language",
-    language
-  });
+  await persistSettings();
 
   statusNode.textContent = apiKey ? "API key and language saved locally." : "API key cleared.";
   await refreshState();
@@ -79,10 +89,10 @@ async function toggleSubtitles() {
     return;
   }
 
-  if (currentCanStop) {
+  if (currentSnapshot?.canStop) {
     await chrome.runtime.sendMessage({
       target: "background",
-      type: "stop_subtitles",
+      type: "session_stop",
       tabId: currentTabId
     });
     await refreshState();
@@ -90,9 +100,10 @@ async function toggleSubtitles() {
   }
 
   try {
+    await persistSettings();
     const response = await chrome.runtime.sendMessage({
       target: "background",
-      type: "start_subtitles",
+      type: "session_start",
       tabId: currentTabId,
       language: languageSelect.value || "en"
     });
@@ -106,12 +117,12 @@ async function toggleSubtitles() {
 }
 
 function renderState(response) {
-  const apiKeySaved = Boolean(response?.apiKeySaved);
-  const active = Boolean(response?.active);
-  const canStop = Boolean(response?.canStop || response?.hasSession);
-  const pageState = response?.pageState || "unknown";
-  currentState = response?.state || "idle";
-  currentCanStop = canStop;
+  currentSnapshot = response || {};
+  const apiKeySaved = Boolean(response?.apiKeySaved || apiKeyInput.value.trim());
+  const canStop = Boolean(response?.canStop || response?.snapshot?.canStop);
+  const captureState = response?.captureState || response?.snapshot?.captureState || "idle";
+  const pageState = response?.pageState || response?.snapshot?.pageState || "unknown";
+  const terminalReason = response?.terminalReason || response?.snapshot?.terminalReason || null;
 
   toggleButton.disabled = (!apiKeySaved && !canStop) || !currentTabId;
   toggleButton.textContent = canStop ? "Stop Subtitles" : "Start Subtitles";
@@ -122,31 +133,48 @@ function renderState(response) {
     return;
   }
 
+  if (terminalReason?.message && !canStop) {
+    statusNode.textContent = terminalReason.message;
+    return;
+  }
+
   if (canStop && pageState === "loading") {
     statusNode.textContent = "Page is reloading; subtitles remain active.";
     return;
   }
 
-  if (canStop && pageState === "content_missing") {
+  if (canStop && pageState === "unavailable") {
     statusNode.textContent = "Subtitles are active, but the overlay cannot attach to this page.";
     return;
   }
 
-  switch (currentState) {
+  switch (captureState) {
     case "starting":
       statusNode.textContent = "Starting capture...";
       break;
-    case "listening":
+    case "running":
       statusNode.textContent = "Subtitles are running on this tab.";
       break;
     case "reconnecting":
       statusNode.textContent = "Reconnecting to Deepgram...";
       break;
-    case "error":
-      statusNode.textContent = response?.error || "An error occurred.";
+    case "stopping":
+      statusNode.textContent = "Stopping subtitles...";
+      break;
+    case "failed":
+      statusNode.textContent = terminalReason?.message || response?.error || "Subtitle capture failed.";
       break;
     default:
-      statusNode.textContent = active || canStop ? "Subtitles active." : "Ready.";
+      statusNode.textContent = canStop ? "Subtitles active." : "Ready.";
       break;
   }
+}
+
+async function persistSettings() {
+  await chrome.runtime.sendMessage({
+    target: "background",
+    type: "settings_save",
+    apiKey: apiKeyInput.value.trim(),
+    language: languageSelect.value || "en"
+  });
 }

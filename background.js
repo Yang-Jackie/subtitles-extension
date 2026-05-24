@@ -1,32 +1,24 @@
+importScripts("session-state.js");
+
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const OFFSCREEN_URL = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
 const TAB_INACTIVE_TIMEOUT_MS = 120000;
 const DEFAULT_LANGUAGE = "en";
 const DEEPGRAM_MODEL = "nova-3";
-const SUPPORTED_LANGUAGES = new Set([
-  "en",
-  "zh-CN",
-  "zh-TW",
-  "vi"
-]);
-const SESSION_STATES = {
-  idle: "idle",
-  starting: "starting",
-  listening: "listening",
-  reconnecting: "reconnecting",
-  stopping: "stopping",
-  stopped: "stopped",
-  error: "error"
-};
-const PAGE_STATES = {
-  unknown: "unknown",
-  loading: "loading",
-  ready: "ready",
-  contentMissing: "content_missing"
+const SUPPORTED_LANGUAGES = new Set(["en", "zh-CN", "zh-TW", "vi"]);
+
+const { CAPTURE_STATES, PAGE_STATES } = sessionState;
+
+const RENDER_MODES = {
+  hidden: "hidden",
+  status: "status",
+  caption: "caption"
 };
 
 const sessions = new Map();
+const popupPorts = new Map();
 let offscreenCreatePromise = null;
+let nextSessionId = 1;
 
 chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
   await syncSessionTabActivity(windowId, tabId);
@@ -34,6 +26,30 @@ chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
 
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   await syncSessionTabActivityForFocusedWindow(windowId);
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "popup") {
+    return;
+  }
+
+  let subscribedTabId = null;
+  port.onMessage.addListener(async (message) => {
+    if (message?.type !== "popup_subscribe" || !message.tabId) {
+      return;
+    }
+
+    subscribedTabId = message.tabId;
+    addPopupPort(subscribedTabId, port);
+    await reconcileSessionWithRuntime(subscribedTabId);
+    await postSnapshotToPort(port, subscribedTabId);
+  });
+
+  port.onDisconnect.addListener(() => {
+    if (subscribedTabId) {
+      removePopupPort(subscribedTabId, port);
+    }
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -52,17 +68,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const session = await getSessionState(tabId);
-  if (!session?.canStop && !session?.hasRuntimeSession) {
+  const session = sessions.get(tabId);
+  if (!session) {
     return;
   }
 
-  sessions.delete(tabId);
-  await sendOffscreenMessage({
-    target: "offscreen",
-    type: "stop_capture",
-    tabId
-  }).catch(() => {});
+  applySessionEvent(tabId, {
+    type: "capture_idle",
+    terminalReason: createTerminalReason("tab_closed", "Tab closed", "page", "background")
+  });
+
+  await sendRuntimeStop(session, "tab_closed").catch(() => {});
   await maybeCloseOffscreenDocument();
 });
 
@@ -71,106 +87,66 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     return;
   }
 
-  const session = await getSessionState(tabId);
-  if (!session?.canStop) {
+  const session = sessions.get(tabId);
+  if (!session || !deriveSessionBooleans(session).hasSession) {
     return;
   }
 
-  const cachedSession = sessions.get(tabId) || {
-    state: session.state,
-    lastError: session.lastError || "",
-    pageState: PAGE_STATES.unknown
-  };
-
   if (changeInfo.status === "loading") {
-    cachedSession.pageState = PAGE_STATES.loading;
-    sessions.set(tabId, cachedSession);
+    applySessionEvent(tabId, { type: "page_state", pageState: PAGE_STATES.loading });
     return;
   }
 
   if (changeInfo.status === "complete") {
-    try {
-      await ensureContentScript(tabId);
-      cachedSession.pageState = PAGE_STATES.ready;
-      await sendTabMessage(tabId, {
-        type: "subtitle_update",
-        text: "",
-        isFinal: false,
-        status: session.state === SESSION_STATES.reconnecting ? "Reconnecting..." : "Listening..."
-      }).catch(() => {});
-    } catch (error) {
-      cachedSession.pageState = PAGE_STATES.contentMissing;
-      cachedSession.lastError = error.message || cachedSession.lastError || "";
-    }
-
-    sessions.set(tabId, cachedSession);
+    await attachContentScript(tabId, { rehydrate: true });
   }
 });
 
 async function handleMessage(message, sender) {
   switch (message?.type) {
+    case "settings_save":
+      await chrome.storage.local.set({
+        deepgramApiKey: message.apiKey || "",
+        deepgramLanguage: resolveLanguage(message.language)
+      });
+      await broadcastSettingsSnapshots();
+      return { ok: true };
     case "save_api_key":
       await chrome.storage.local.set({ deepgramApiKey: message.apiKey || "" });
+      await broadcastSettingsSnapshots();
       return { ok: true };
     case "save_language":
       await chrome.storage.local.set({ deepgramLanguage: resolveLanguage(message.language) });
+      await broadcastSettingsSnapshots();
       return { ok: true };
     case "get_state":
+      await reconcileSessionWithRuntime(message.tabId);
       return getPopupState(message.tabId);
+    case "session_start":
     case "start_subtitles":
       return startSubtitlesForTab(message.tabId, message.language);
+    case "session_stop":
     case "stop_subtitles":
       return stopSubtitlesForTab(message.tabId);
+    case "runtime_started":
+    case "runtime_running":
+    case "runtime_reconnecting":
+    case "runtime_stopped":
+    case "runtime_failed":
+    case "transcript_update":
+      return handleRuntimeEvent(message);
+    case "content_ready":
+      return handleContentReady(message, sender);
+    case "content_unavailable":
+      return handleContentUnavailable(message);
+    case "render_ack":
+      return { ok: true };
     case "session_status":
-      return updateSessionStatus(message, sender);
     case "relay_to_tab":
-      return relayToTab(message);
+      return handleLegacyMessage(message);
     default:
       return { ok: false, error: "Unsupported message type" };
   }
-}
-
-async function getPopupState(tabId) {
-  const { deepgramApiKey = "", deepgramLanguage = DEFAULT_LANGUAGE } = await chrome.storage.local.get([
-    "deepgramApiKey",
-    "deepgramLanguage"
-  ]);
-  const session = await getSessionState(tabId);
-
-  return {
-    ok: true,
-    apiKeySaved: Boolean(deepgramApiKey),
-    language: resolveLanguage(deepgramLanguage),
-    active: isActiveCaptureState(session?.state),
-    hasSession: Boolean(session?.hasSession),
-    hasRuntimeSession: Boolean(session?.hasRuntimeSession),
-    canStop: Boolean(session?.canStop),
-    captureState: session?.captureState || session?.state || SESSION_STATES.idle,
-    state: session?.state || SESSION_STATES.idle,
-    pageState: session?.pageState || PAGE_STATES.unknown,
-    error: session?.lastError || ""
-  };
-}
-
-async function getIdlePopupState(error = "") {
-  const { deepgramApiKey = "", deepgramLanguage = DEFAULT_LANGUAGE } = await chrome.storage.local.get([
-    "deepgramApiKey",
-    "deepgramLanguage"
-  ]);
-
-  return {
-    ok: true,
-    apiKeySaved: Boolean(deepgramApiKey),
-    language: resolveLanguage(deepgramLanguage),
-    active: false,
-    hasSession: false,
-    hasRuntimeSession: false,
-    canStop: false,
-    captureState: SESSION_STATES.idle,
-    state: SESSION_STATES.idle,
-    pageState: PAGE_STATES.unknown,
-    error
-  };
 }
 
 async function startSubtitlesForTab(tabId, requestedLanguage) {
@@ -183,53 +159,57 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
     throw new Error("This tab cannot be captured. Try a standard http/https page.");
   }
 
-  const { deepgramApiKey = "" } = await chrome.storage.local.get("deepgramApiKey");
+  const { deepgramApiKey = "", deepgramLanguage = DEFAULT_LANGUAGE } = await chrome.storage.local.get([
+    "deepgramApiKey",
+    "deepgramLanguage"
+  ]);
   if (!deepgramApiKey) {
     throw new Error("Deepgram API key is required");
   }
 
-  const { deepgramLanguage = DEFAULT_LANGUAGE } = await chrome.storage.local.get("deepgramLanguage");
-  const language = resolveLanguage(requestedLanguage || deepgramLanguage);
-  const existingSession = await getSessionState(tabId);
-
-  if (existingSession?.canStop || existingSession?.hasRuntimeSession) {
+  const existingSession = sessions.get(tabId);
+  if (existingSession && deriveSessionBooleans(existingSession).canStop) {
     return getPopupState(tabId);
   }
 
-  await ensureContentScript(tabId);
-  await ensureOffscreenDocument();
+  const language = resolveLanguage(requestedLanguage || deepgramLanguage);
+  const session = createSessionSnapshot(tabId, { language, model: DEEPGRAM_MODEL });
+  sessions.set(tabId, session);
+  broadcastSessionSnapshot(tabId);
 
-  sessions.set(tabId, {
-    state: SESSION_STATES.starting,
-    lastError: "",
-    pageState: PAGE_STATES.ready
-  });
+  try {
+    await attachContentScript(tabId, { rehydrate: false });
+  } catch (error) {
+    applySessionEvent(tabId, {
+      type: "page_state",
+      pageState: PAGE_STATES.unavailable,
+      terminalReason: createTerminalReason("unsupported_page", error.message || "Overlay unavailable", "page", "background")
+    });
+  }
 
-  await sendTabMessage(tabId, {
-    type: "subtitle_update",
-    text: "",
-    isFinal: false,
-    status: "Listening..."
+  applySessionEvent(tabId, {
+    type: "render_status",
+    status: "Starting capture..."
   });
 
   let streamId;
   try {
     streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   } catch (error) {
-    sessions.delete(tabId);
-    await sendTabMessage(tabId, {
-      type: "subtitle_update",
-      text: "",
-      isFinal: false,
-      status: "Unable to capture tab audio"
+    applySessionEvent(tabId, {
+      type: "capture_failed",
+      terminalReason: createTerminalReason("capture_denied", "Unable to capture tab audio", "runtime", "background")
     });
     await maybeCloseOffscreenDocument();
     throw error;
   }
 
+  await ensureOffscreenDocument();
+
   const response = await sendOffscreenMessage({
     target: "offscreen",
-    type: "start_capture",
+    type: "runtime_start",
+    sessionId: session.sessionId,
     tabId,
     streamId,
     apiKey: deepgramApiKey,
@@ -238,21 +218,20 @@ async function startSubtitlesForTab(tabId, requestedLanguage) {
   });
 
   if (!response?.ok) {
-    sessions.delete(tabId);
-
-    await sendTabMessage(tabId, {
-      type: "subtitle_update",
-      text: "",
-      isFinal: false,
-      status: response?.error || "Failed to start subtitle capture"
-    }).catch(() => {});
-
+    applySessionEvent(tabId, {
+      type: "capture_failed",
+      terminalReason: createTerminalReason(
+        "startup_failed",
+        response?.error || "Failed to start subtitle capture",
+        "runtime",
+        "offscreen"
+      )
+    });
     await maybeCloseOffscreenDocument();
     throw new Error(response?.error || "Failed to start subtitle capture");
   }
 
   await syncSessionTabActivityForTab(tabId);
-
   return getPopupState(tabId);
 }
 
@@ -261,110 +240,341 @@ async function stopSubtitlesForTab(tabId) {
     throw new Error("No active tab available");
   }
 
-  const session = await getSessionState(tabId);
-  if (!session?.canStop && !session?.hasRuntimeSession) {
-    await sendTabMessage(tabId, { type: "subtitle_clear" }).catch(() => {});
-    await maybeCloseOffscreenDocument();
-    return getIdlePopupState(session?.lastError || "");
+  let session = sessions.get(tabId);
+  if (!session) {
+    const snapshot = await getPopupState(tabId);
+    await sendTabRenderClear(tabId, null).catch(() => {});
+    return snapshot;
   }
 
-  const cachedSession = sessions.get(tabId);
-  if (cachedSession) {
-    cachedSession.state = SESSION_STATES.stopping;
-    sessions.set(tabId, cachedSession);
-  }
+  const terminalReason = createTerminalReason("user_stop", "Stopped by user", "user", "background");
+  applySessionEvent(tabId, {
+    type: "capture_stopping",
+    terminalReason
+  });
 
-  await sendOffscreenMessage({
-    target: "offscreen",
-    type: "stop_capture",
-    tabId
-  }).catch(() => {});
-  await sendTabMessage(tabId, { type: "subtitle_clear" }).catch(() => {});
-  sessions.delete(tabId);
+  session = sessions.get(tabId);
+  await sendRuntimeStop(session, "user_stop").catch(() => {});
+  applySessionEvent(tabId, {
+    type: "capture_idle",
+    terminalReason,
+    renderClear: true
+  });
   await maybeCloseOffscreenDocument();
 
-  return getIdlePopupState(session?.lastError || "");
+  return getPopupState(tabId);
 }
 
-async function updateSessionStatus(message) {
-  const session = sessions.get(message.tabId) || {
-    state: SESSION_STATES.idle,
-    lastError: "",
-    pageState: PAGE_STATES.unknown
-  };
-
-  session.state = message.state || session.state;
-  if (typeof message.error === "string" && message.error.length > 0) {
-    session.lastError = message.error;
-  } else if (session.state === SESSION_STATES.listening || session.state === SESSION_STATES.reconnecting || session.state === SESSION_STATES.stopped) {
-    session.lastError = "";
+async function handleRuntimeEvent(message) {
+  if (!isCurrentSessionMessage(message)) {
+    return { ok: true, ignored: true };
   }
 
-  if (session.state === SESSION_STATES.stopped) {
-    sessions.delete(message.tabId);
-    await maybeCloseOffscreenDocument();
-  } else {
-    sessions.set(message.tabId, session);
+  switch (message.type) {
+    case "runtime_started":
+      applySessionEvent(message.tabId, { type: "runtime_seen", runtime: message.runtime });
+      break;
+    case "runtime_running":
+      applySessionEvent(message.tabId, {
+        type: "capture_running",
+        runtime: {
+          hasRuntime: true,
+          websocketState: message.websocketState || "open"
+        }
+      });
+      break;
+    case "runtime_reconnecting":
+      applySessionEvent(message.tabId, {
+        type: "capture_reconnecting",
+        runtime: {
+          hasRuntime: true,
+          websocketState: "closed"
+        }
+      });
+      break;
+    case "runtime_stopped":
+      {
+        const session = sessions.get(message.tabId);
+        const terminalReason = session?.captureState === CAPTURE_STATES.stopping && session.terminalReason
+          ? session.terminalReason
+          : normalizeReason(message.reason, "unknown_failure", "Stopped", "runtime", "offscreen");
+
+        applySessionEvent(message.tabId, {
+          type: "capture_idle",
+          terminalReason
+        });
+      }
+      await maybeCloseOffscreenDocument();
+      break;
+    case "runtime_failed":
+      applySessionEvent(message.tabId, {
+        type: "capture_failed",
+        terminalReason: normalizeReason(message.reason, "unknown_failure", "Subtitle capture failed", "runtime", "offscreen")
+      });
+      await maybeCloseOffscreenDocument();
+      break;
+    case "transcript_update":
+      applySessionEvent(message.tabId, {
+        type: "transcript_update",
+        text: message.text || "",
+        isFinal: Boolean(message.isFinal)
+      });
+      break;
+    default:
+      return { ok: false, error: "Unsupported runtime event" };
   }
 
   return { ok: true };
 }
 
-async function relayToTab(message) {
-  if (!message.tabId || !message.payload) {
-    return { ok: false, error: "Missing relay target" };
-  }
-
-  try {
-    await sendTabMessage(message.tabId, message.payload);
+async function handleContentReady(message, sender) {
+  const tabId = message.tabId || sender?.tab?.id;
+  if (!tabId) {
     return { ok: true };
-  } catch (error) {
-    return { ok: false, error: error.message || "Failed to message tab" };
   }
+
+  const session = sessions.get(tabId);
+  if (session) {
+    applySessionEvent(tabId, { type: "page_state", pageState: PAGE_STATES.attached });
+    await sendTabRenderUpdate(tabId, session, "render_rehydrate").catch(() => {});
+  }
+
+  return { ok: true };
 }
 
-async function getSessionState(tabId) {
-  const offscreenSession = await getOffscreenSessionState(tabId);
-  const cachedSession = sessions.get(tabId);
+function handleContentUnavailable(message) {
+  if (message.tabId && sessions.has(message.tabId)) {
+    applySessionEvent(message.tabId, {
+      type: "page_state",
+      pageState: PAGE_STATES.unavailable,
+      terminalReason: createTerminalReason(
+        "unsupported_page",
+        message.reason || "Overlay unavailable",
+        "page",
+        "content"
+      )
+    });
+  }
 
-  if (offscreenSession) {
-    const offscreenState = offscreenSession.state || SESSION_STATES.idle;
-    const offscreenHasRuntimeSession = Boolean(
-      offscreenSession.hasRuntimeSession ||
-      offscreenSession.hasSession ||
-      offscreenSession.active
-    );
+  return { ok: true };
+}
 
-    if (offscreenHasRuntimeSession) {
-      const session = {
-        state: offscreenState,
-        hasRuntimeSession: true,
-        lastError: offscreenSession.lastError || cachedSession?.lastError || "",
-        pageState: cachedSession?.pageState || PAGE_STATES.unknown
+async function handleLegacyMessage(message) {
+  if (message.type === "relay_to_tab") {
+    if (!message.tabId || !message.payload) {
+      return { ok: false, error: "Missing relay target" };
+    }
+
+    try {
+      await sendTabMessage(message.tabId, message.payload);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error.message || "Failed to message tab" };
+    }
+  }
+
+  if (message.type !== "session_status") {
+    return { ok: true };
+  }
+
+  const session = sessions.get(message.tabId);
+  if (!session) {
+    return { ok: true };
+  }
+
+  if (message.state === "listening") {
+    applySessionEvent(message.tabId, { type: "capture_running" });
+  } else if (message.state === "reconnecting") {
+    applySessionEvent(message.tabId, { type: "capture_reconnecting" });
+  } else if (message.state === "error") {
+    applySessionEvent(message.tabId, {
+      type: "capture_failed",
+      terminalReason: createTerminalReason("unknown_failure", message.error || "Subtitle capture failed", "runtime", "offscreen")
+    });
+  }
+
+  return { ok: true };
+}
+
+function createSessionSnapshot(tabId, settings) {
+  const now = Date.now();
+  return {
+    sessionId: `s_${now}_${nextSessionId++}`,
+    tabId,
+    desiredActive: true,
+    captureState: CAPTURE_STATES.starting,
+    pageState: PAGE_STATES.unknown,
+    terminalReason: null,
+    settings,
+    render: createHiddenRender(),
+    runtime: {
+      hasRuntime: false,
+      websocketState: "none",
+      isTabActive: true,
+      lastRuntimeSeenAt: 0
+    },
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function applySessionEvent(tabId, event) {
+  const session = sessions.get(tabId);
+  if (!session) {
+    return null;
+  }
+
+  switch (event.type) {
+    case "page_state":
+      session.pageState = event.pageState;
+      if (event.terminalReason) {
+        session.terminalReason = event.terminalReason;
+      }
+      break;
+    case "capture_stopping":
+      session.desiredActive = false;
+      session.captureState = CAPTURE_STATES.stopping;
+      session.terminalReason = event.terminalReason || session.terminalReason;
+      session.render = createStatusRender(session.terminalReason?.message || "Stopping subtitles...");
+      break;
+    case "capture_running":
+      session.desiredActive = true;
+      session.captureState = CAPTURE_STATES.running;
+      session.terminalReason = null;
+      session.runtime = {
+        ...session.runtime,
+        ...event.runtime,
+        hasRuntime: true,
+        websocketState: event.runtime?.websocketState || "open",
+        lastRuntimeSeenAt: Date.now()
       };
-      sessions.set(tabId, session);
-      return normalizeSessionState(session);
-    }
-
-    if (!cachedSession || !isLocalTransitionState(cachedSession.state)) {
-      sessions.delete(tabId);
-      return null;
-    }
+      session.render = createStatusRender("Listening...");
+      break;
+    case "capture_reconnecting":
+      session.captureState = CAPTURE_STATES.reconnecting;
+      session.runtime = {
+        ...session.runtime,
+        ...event.runtime,
+        hasRuntime: true,
+        websocketState: "closed",
+        lastRuntimeSeenAt: Date.now()
+      };
+      session.render = createStatusRender("Reconnecting...");
+      break;
+    case "capture_idle":
+      session.desiredActive = false;
+      session.captureState = CAPTURE_STATES.idle;
+      session.runtime = {
+        ...session.runtime,
+        hasRuntime: false,
+        websocketState: "none",
+        lastRuntimeSeenAt: Date.now()
+      };
+      session.terminalReason = event.terminalReason || session.terminalReason;
+      session.render = event.renderClear ? createHiddenRender() : createStatusRender(session.terminalReason?.message || "");
+      break;
+    case "capture_failed":
+      session.desiredActive = false;
+      session.captureState = CAPTURE_STATES.failed;
+      session.runtime = {
+        ...session.runtime,
+        hasRuntime: false,
+        websocketState: "none",
+        lastRuntimeSeenAt: Date.now()
+      };
+      session.terminalReason = event.terminalReason || session.terminalReason;
+      session.render = createStatusRender(session.terminalReason?.message || "Subtitle capture failed");
+      break;
+    case "runtime_seen":
+      session.runtime = {
+        ...session.runtime,
+        ...event.runtime,
+        lastRuntimeSeenAt: Date.now()
+      };
+      break;
+    case "render_status":
+      session.render = createStatusRender(event.status || "");
+      break;
+    case "transcript_update":
+      session.render = createCaptionRender(event.text, event.isFinal, session.render);
+      break;
+    default:
+      break;
   }
 
-  if (!cachedSession) {
-    return null;
-  }
-
-  if (!isLocalTransitionState(cachedSession.state)) {
-    sessions.delete(tabId);
-    return null;
-  }
-
-  return normalizeSessionState(cachedSession);
+  session.updatedAt = Date.now();
+  sessions.set(tabId, session);
+  broadcastSessionSnapshot(tabId);
+  pushRenderForSession(session).catch(() => {});
+  return session;
 }
 
-async function getOffscreenSessionState(tabId) {
+async function attachContentScript(tabId, { rehydrate }) {
+  const session = sessions.get(tabId);
+  if (session) {
+    session.pageState = PAGE_STATES.injecting;
+    session.updatedAt = Date.now();
+    broadcastSessionSnapshot(tabId);
+  }
+
+  await ensureContentScript(tabId);
+
+  const updatedSession = sessions.get(tabId);
+  if (updatedSession) {
+    updatedSession.pageState = PAGE_STATES.attached;
+    updatedSession.updatedAt = Date.now();
+    broadcastSessionSnapshot(tabId);
+    if (rehydrate) {
+      await sendTabRenderUpdate(tabId, updatedSession, "render_rehydrate").catch(() => {});
+    }
+  }
+}
+
+async function reconcileSessionWithRuntime(tabId) {
+  const session = sessions.get(tabId);
+  if (!session) {
+    return null;
+  }
+
+  const runtimeSnapshot = await getRuntimeSnapshot(tabId);
+  if (!runtimeSnapshot) {
+    if (session.runtime.hasRuntime && isLiveCaptureState(session.captureState)) {
+      applySessionEvent(tabId, {
+        type: "capture_failed",
+        terminalReason: createTerminalReason("unknown_failure", "Runtime session disappeared", "runtime", "background")
+      });
+    }
+    return sessions.get(tabId) || null;
+  }
+
+  if (!runtimeSnapshot.hasRuntime) {
+    if (session.runtime.hasRuntime && isLiveCaptureState(session.captureState)) {
+      applySessionEvent(tabId, {
+        type: "capture_failed",
+        terminalReason: createTerminalReason("unknown_failure", "Runtime session disappeared", "runtime", "background")
+      });
+    }
+    return sessions.get(tabId) || null;
+  }
+
+  session.runtime = {
+    ...session.runtime,
+    hasRuntime: Boolean(runtimeSnapshot.hasRuntime),
+    websocketState: runtimeSnapshot.websocketState || "none",
+    isTabActive: runtimeSnapshot.isTabActive !== false,
+    lastRuntimeSeenAt: Date.now()
+  };
+
+  if (runtimeSnapshot.hasRuntime) {
+    session.captureState = sessionState.mapRuntimeSnapshotToCaptureState(runtimeSnapshot, session.captureState);
+  }
+
+  session.updatedAt = Date.now();
+  sessions.set(tabId, session);
+  return session;
+}
+
+async function getRuntimeSnapshot(tabId) {
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ["OFFSCREEN_DOCUMENT"],
     documentUrls: [OFFSCREEN_URL]
@@ -377,17 +587,17 @@ async function getOffscreenSessionState(tabId) {
   try {
     const response = await sendOffscreenMessage({
       target: "offscreen",
-      type: "get_session_state",
+      type: "runtime_get_snapshot",
       tabId
     });
     return response?.ok ? response : null;
   } catch (error) {
-    console.warn("Failed to read offscreen session state", error);
+    console.warn("Failed to read offscreen runtime snapshot", error);
     return null;
   }
 }
 
-async function getOffscreenSessionTabIds() {
+async function getRuntimeSessionTabIds() {
   const existingContexts = await chrome.runtime.getContexts({
     contextTypes: ["OFFSCREEN_DOCUMENT"],
     documentUrls: [OFFSCREEN_URL]
@@ -400,7 +610,7 @@ async function getOffscreenSessionTabIds() {
   try {
     const response = await sendOffscreenMessage({
       target: "offscreen",
-      type: "list_session_tabs"
+      type: "runtime_list_sessions"
     });
     return response?.ok && Array.isArray(response.tabIds) ? response.tabIds : [];
   } catch (error) {
@@ -477,16 +687,24 @@ async function maybeCloseOffscreenDocument() {
 }
 
 async function syncSessionTabActivity(windowId, activeTabId) {
-  const sessionTabIds = await getOffscreenSessionTabIds();
+  const sessionTabIds = await getRuntimeSessionTabIds();
   if (sessionTabIds.length === 0) {
     return;
   }
 
   for (const sessionTabId of sessionTabIds) {
+    const session = sessions.get(sessionTabId);
     const active = windowId !== chrome.windows.WINDOW_ID_NONE && sessionTabId === activeTabId;
+    if (session) {
+      session.runtime.isTabActive = active;
+      session.updatedAt = Date.now();
+      broadcastSessionSnapshot(sessionTabId);
+    }
+
     await sendOffscreenMessage({
       target: "offscreen",
-      type: "set_tab_active",
+      type: "runtime_set_tab_active",
+      sessionId: session?.sessionId,
       tabId: sessionTabId,
       active,
       inactiveTimeoutMs: TAB_INACTIVE_TIMEOUT_MS
@@ -513,9 +731,17 @@ async function syncSessionTabActivityForTab(tabId) {
     const tab = await chrome.tabs.get(tabId);
     const focusedWindow = await chrome.windows.getLastFocused();
     const isFocusedTab = focusedWindow?.id === tab.windowId && tab.active;
+    const session = sessions.get(tabId);
+    if (session) {
+      session.runtime.isTabActive = isFocusedTab;
+      session.updatedAt = Date.now();
+      broadcastSessionSnapshot(tabId);
+    }
+
     await sendOffscreenMessage({
       target: "offscreen",
-      type: "set_tab_active",
+      type: "runtime_set_tab_active",
+      sessionId: session?.sessionId,
       tabId,
       active: isFocusedTab,
       inactiveTimeoutMs: TAB_INACTIVE_TIMEOUT_MS
@@ -523,6 +749,248 @@ async function syncSessionTabActivityForTab(tabId) {
   } catch (error) {
     console.warn("Failed to sync tab activity for session", error);
   }
+}
+
+async function sendRuntimeStop(session, reasonCode) {
+  if (!session) {
+    return;
+  }
+
+  await sendOffscreenMessage({
+    target: "offscreen",
+    type: "runtime_stop",
+    sessionId: session.sessionId,
+    tabId: session.tabId,
+    reasonCode
+  });
+}
+
+async function pushRenderForSession(session) {
+  if (!session || session.pageState !== PAGE_STATES.attached) {
+    return;
+  }
+
+  await sendTabRenderUpdate(session.tabId, session, "render_update");
+}
+
+async function sendTabRenderUpdate(tabId, session, type) {
+  await sendTabMessage(tabId, {
+    type,
+    sessionId: session.sessionId,
+    render: session.render,
+    captureState: session.captureState,
+    pageState: session.pageState,
+    terminalReason: session.terminalReason
+  });
+}
+
+async function sendTabRenderClear(tabId, sessionId) {
+  await sendTabMessage(tabId, {
+    type: "render_clear",
+    sessionId
+  });
+}
+
+async function getPopupState(tabId) {
+  const settings = await getStoredSettings();
+  const session = sessions.get(tabId) || null;
+  return {
+    ok: true,
+    ...settings,
+    snapshot: buildSessionSnapshot(session, settings),
+    ...derivePopupState(session)
+  };
+}
+
+async function postSnapshotToPort(port, tabId) {
+  try {
+    port.postMessage({
+      type: "session_snapshot",
+      snapshot: await getPopupState(tabId)
+    });
+  } catch (error) {
+    removePopupPort(tabId, port);
+  }
+}
+
+function broadcastSessionSnapshot(tabId) {
+  const ports = popupPorts.get(tabId);
+  if (!ports || ports.size === 0) {
+    return;
+  }
+
+  for (const port of ports) {
+    postSnapshotToPort(port, tabId);
+  }
+}
+
+async function broadcastSettingsSnapshots() {
+  for (const tabId of popupPorts.keys()) {
+    broadcastSessionSnapshot(tabId);
+  }
+}
+
+function addPopupPort(tabId, port) {
+  if (!popupPorts.has(tabId)) {
+    popupPorts.set(tabId, new Set());
+  }
+
+  popupPorts.get(tabId).add(port);
+}
+
+function removePopupPort(tabId, port) {
+  const ports = popupPorts.get(tabId);
+  if (!ports) {
+    return;
+  }
+
+  ports.delete(port);
+  if (ports.size === 0) {
+    popupPorts.delete(tabId);
+  }
+}
+
+function derivePopupState(session) {
+  const booleans = deriveSessionBooleans(session);
+  return {
+    active: booleans.active,
+    hasSession: booleans.hasSession,
+    hasRuntimeSession: Boolean(session?.runtime?.hasRuntime),
+    canStop: booleans.canStop,
+    captureState: session?.captureState || CAPTURE_STATES.idle,
+    state: session?.captureState || CAPTURE_STATES.idle,
+    pageState: session?.pageState || PAGE_STATES.unknown,
+    terminalReason: session?.terminalReason || null,
+    error: session?.terminalReason?.message || ""
+  };
+}
+
+function deriveSessionBooleans(session) {
+  return sessionState.deriveSessionBooleans(session);
+}
+
+function buildSessionSnapshot(session, settings) {
+  if (!session) {
+    return {
+      sessionId: null,
+      tabId: null,
+      desiredActive: false,
+      captureState: CAPTURE_STATES.idle,
+      pageState: PAGE_STATES.unknown,
+      terminalReason: null,
+      settings: {
+        language: settings.language,
+        model: DEEPGRAM_MODEL
+      },
+      render: createHiddenRender(),
+      runtime: {
+        hasRuntime: false,
+        websocketState: "none",
+        isTabActive: true,
+        lastRuntimeSeenAt: 0
+      },
+      active: false,
+      canStop: false,
+      hasSession: false
+    };
+  }
+
+  return {
+    ...session,
+    ...deriveSessionBooleans(session)
+  };
+}
+
+async function getStoredSettings() {
+  const { deepgramApiKey = "", deepgramLanguage = DEFAULT_LANGUAGE } = await chrome.storage.local.get([
+    "deepgramApiKey",
+    "deepgramLanguage"
+  ]);
+
+  return {
+    apiKeySaved: Boolean(deepgramApiKey),
+    language: resolveLanguage(deepgramLanguage)
+  };
+}
+
+function createHiddenRender() {
+  return {
+    mode: RENDER_MODES.hidden,
+    status: "",
+    finalText: "",
+    interimText: "",
+    isFinal: false
+  };
+}
+
+function createStatusRender(status) {
+  return {
+    mode: status ? RENDER_MODES.status : RENDER_MODES.hidden,
+    status: status || "",
+    finalText: "",
+    interimText: "",
+    isFinal: false
+  };
+}
+
+function createCaptionRender(text, isFinal, previousRender) {
+  if (isFinal) {
+    return {
+      mode: RENDER_MODES.caption,
+      status: "",
+      finalText: text || "",
+      interimText: "",
+      isFinal: true
+    };
+  }
+
+  return {
+    mode: RENDER_MODES.caption,
+    status: "",
+    finalText: previousRender?.finalText || "",
+    interimText: text || "",
+    isFinal: false
+  };
+}
+
+function createTerminalReason(code, message, category, source) {
+  return {
+    code,
+    message,
+    category,
+    source,
+    at: Date.now()
+  };
+}
+
+function normalizeReason(reason, defaultCode, defaultMessage, defaultCategory, defaultSource) {
+  if (reason && typeof reason === "object") {
+    return {
+      code: reason.code || defaultCode,
+      message: reason.message || defaultMessage,
+      category: reason.category || defaultCategory,
+      source: reason.source || defaultSource,
+      at: reason.at || Date.now()
+    };
+  }
+
+  if (typeof reason === "string" && reason) {
+    return createTerminalReason(defaultCode, reason, defaultCategory, defaultSource);
+  }
+
+  return createTerminalReason(defaultCode, defaultMessage, defaultCategory, defaultSource);
+}
+
+function isCurrentSessionMessage(message) {
+  const session = sessions.get(message.tabId);
+  return Boolean(session && message.sessionId && session.sessionId === message.sessionId);
+}
+
+function isLiveCaptureState(captureState) {
+  return captureState === CAPTURE_STATES.starting ||
+    captureState === CAPTURE_STATES.running ||
+    captureState === CAPTURE_STATES.reconnecting ||
+    captureState === CAPTURE_STATES.stopping;
 }
 
 function isCapturableUrl(url) {
@@ -533,40 +1001,14 @@ function isCapturableUrl(url) {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
+function resolveLanguage(language) {
+  return SUPPORTED_LANGUAGES.has(language) ? language : DEFAULT_LANGUAGE;
+}
+
 function sendOffscreenMessage(message) {
   return chrome.runtime.sendMessage(message);
 }
 
 function sendTabMessage(tabId, message) {
   return chrome.tabs.sendMessage(tabId, message);
-}
-
-function resolveLanguage(language) {
-  return SUPPORTED_LANGUAGES.has(language) ? language : DEFAULT_LANGUAGE;
-}
-
-function normalizeSessionState(session) {
-  const state = session?.state || SESSION_STATES.idle;
-  const hasRuntimeSession = Boolean(session?.hasRuntimeSession);
-  const hasLocalTransition = isLocalTransitionState(state);
-  const canStop = hasRuntimeSession || hasLocalTransition;
-
-  return {
-    active: isActiveCaptureState(state),
-    hasSession: canStop,
-    hasRuntimeSession,
-    canStop,
-    captureState: state,
-    state,
-    pageState: session?.pageState || PAGE_STATES.unknown,
-    lastError: session?.lastError || ""
-  };
-}
-
-function isActiveCaptureState(state) {
-  return state === SESSION_STATES.listening || state === SESSION_STATES.reconnecting;
-}
-
-function isLocalTransitionState(state) {
-  return state === SESSION_STATES.starting || state === SESSION_STATES.stopping;
 }

@@ -24,12 +24,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function handleRuntimeMessage(message) {
   switch (message?.type) {
+    case "runtime_start":
     case "start_capture":
       await startCapture(message);
       return { ok: true };
+    case "runtime_stop":
     case "stop_capture":
-      await stopCapture(message.tabId, { notifyStopped: true });
+      await stopCapture(message.tabId, {
+        notifyStopped: true,
+        stopReason: reasonFromCode(message.reasonCode || "user_stop"),
+        isFailure: false
+      });
       return { ok: true };
+    case "runtime_get_snapshot":
     case "get_session_state":
       return getSessionState(message.tabId);
     case "has_active_sessions":
@@ -37,19 +44,21 @@ async function handleRuntimeMessage(message) {
         ok: true,
         active: sessions.size > 0
       };
+    case "runtime_list_sessions":
     case "list_session_tabs":
       return {
         ok: true,
         tabIds: Array.from(sessions.keys())
       };
+    case "runtime_set_tab_active":
     case "set_tab_active":
-      return updateTabActivity(message.tabId, message.active, message.inactiveTimeoutMs);
+      return updateTabActivity(message.tabId, message.sessionId, message.active, message.inactiveTimeoutMs);
     default:
       return { ok: false, error: "Unsupported offscreen message" };
   }
 }
 
-async function startCapture({ tabId, streamId, apiKey, language, model }) {
+async function startCapture({ sessionId, tabId, streamId, apiKey, language, model }) {
   await stopCapture(tabId, { notifyStopped: false });
 
   let mediaStream = null;
@@ -72,6 +81,7 @@ async function startCapture({ tabId, streamId, apiKey, language, model }) {
     }
 
     session = createSession({
+      sessionId,
       tabId,
       apiKey,
       language,
@@ -93,8 +103,9 @@ async function startCapture({ tabId, streamId, apiKey, language, model }) {
   }
 }
 
-function createSession({ tabId, apiKey, language, model, mediaStream }) {
+function createSession({ sessionId, tabId, apiKey, language, model, mediaStream }) {
   const session = {
+    sessionId,
     tabId,
     apiKey,
     language,
@@ -155,17 +166,14 @@ async function initializeAudioPipeline(session) {
   audioTrack.addEventListener("ended", () => {
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: "Audio stream lost"
+      stopReason: createReason("stream_lost", "Audio stream lost", "runtime"),
+      isFailure: true
     }).catch(() => {});
   });
 
   await openDeepgramWebSocket(session);
-  await notifyBackground(session.tabId, "listening");
-  await sendSubtitleEvent(session.tabId, {
-    type: "subtitle_update",
-    text: "",
-    isFinal: false,
-    status: "Listening..."
+  await notifyBackground(session, "runtime_running", {
+    websocketState: "open"
   });
 }
 
@@ -238,6 +246,7 @@ async function openDeepgramWebSocket(session) {
   const protocols = ["token", session.apiKey];
 
   await new Promise((resolve, reject) => {
+    let hasOpened = false;
     console.log("Opening Deepgram websocket", {
       tabId: session.tabId,
       model: session.model || DEFAULT_MODEL,
@@ -250,6 +259,7 @@ async function openDeepgramWebSocket(session) {
     session.websocket = websocket;
 
     websocket.onopen = async () => {
+      hasOpened = true;
       console.log("Deepgram websocket connected", {
         tabId: session.tabId,
         model: session.model || DEFAULT_MODEL,
@@ -284,12 +294,12 @@ async function openDeepgramWebSocket(session) {
         return;
       }
 
-      await notifyBackground(session.tabId, "reconnecting");
-      await sendSubtitleEvent(session.tabId, {
-        type: "subtitle_update",
-        text: "",
-        isFinal: false,
-        status: "Reconnecting..."
+      if (!hasOpened) {
+        return;
+      }
+
+      await notifyBackground(session, "runtime_reconnecting", {
+        reason: createReason("network_reconnect", "Reconnecting to Deepgram", "network")
       });
 
       scheduleReconnect(session);
@@ -326,16 +336,10 @@ function handleDeepgramMessage(session, rawMessage) {
   if (payload.type === "Error") {
     const errorMessage = payload.description || payload.message || "Deepgram error";
     session.lastError = errorMessage;
-    sendSubtitleEvent(session.tabId, {
-      type: "subtitle_update",
-      text: "",
-      isFinal: false,
-      status: errorMessage
-    });
-    notifyBackground(session.tabId, "error", errorMessage).catch(() => {});
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: errorMessage
+      stopReason: createReason("deepgram_error", errorMessage, "provider"),
+      isFailure: true
     }).catch(() => {});
     return;
   }
@@ -347,12 +351,11 @@ function handleDeepgramMessage(session, rawMessage) {
   }
 
   const isFinal = Boolean(payload.is_final);
-  sendSubtitleEvent(session.tabId, {
-    type: "subtitle_update",
+  notifyBackground(session, "transcript_update", {
     text: transcript,
     isFinal
   }).catch((error) => {
-    console.warn("Failed to deliver subtitle update", error);
+    console.warn("Failed to deliver transcript update", error);
   });
 }
 
@@ -373,12 +376,8 @@ function scheduleReconnect(session) {
 
     try {
       await openDeepgramWebSocket(session);
-      await notifyBackground(session.tabId, "listening");
-      await sendSubtitleEvent(session.tabId, {
-        type: "subtitle_update",
-        text: "",
-        isFinal: false,
-        status: "Listening..."
+      await notifyBackground(session, "runtime_running", {
+        websocketState: "open"
       });
     } catch (error) {
       console.error("Deepgram reconnect failed", error);
@@ -387,10 +386,13 @@ function scheduleReconnect(session) {
   }, delay);
 }
 
-function updateTabActivity(tabId, active, inactiveTimeoutMs = 0) {
+function updateTabActivity(tabId, sessionId, active, inactiveTimeoutMs = 0) {
   const session = sessions.get(tabId);
   if (!session) {
     return { ok: true };
+  }
+  if (sessionId && session.sessionId !== sessionId) {
+    return { ok: true, ignored: true };
   }
 
   session.isTabActive = Boolean(active);
@@ -425,7 +427,8 @@ function scheduleInactiveTimeout(session) {
 
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: "Stopped after 120 seconds away from the tab"
+      stopReason: createReason("inactive_timeout", "Stopped after 120 seconds away from the tab", "timeout"),
+      isFailure: false
     }).catch((error) => {
       console.warn("Failed to stop capture after tab inactivity", error);
     });
@@ -458,7 +461,8 @@ function scheduleSilenceTimeout(session) {
 
     stopCapture(session.tabId, {
       notifyStopped: true,
-      stopReason: "Stopped after 60 seconds without audible audio"
+      stopReason: createReason("silence_timeout", "Stopped after 60 seconds without audible audio", "timeout"),
+      isFailure: false
     }).catch((error) => {
       console.warn("Failed to stop capture after silence timeout", error);
     });
@@ -474,7 +478,7 @@ function clearSilenceTimeout(session) {
   session.silenceTimer = null;
 }
 
-async function stopCapture(tabId, { notifyStopped, stopReason = "" }) {
+async function stopCapture(tabId, { notifyStopped, stopReason = null, isFailure = false }) {
   const session = sessions.get(tabId);
   if (!session) {
     return;
@@ -482,7 +486,7 @@ async function stopCapture(tabId, { notifyStopped, stopReason = "" }) {
 
   session.stopping = true;
   if (stopReason) {
-    session.lastError = stopReason;
+    session.lastError = stopReason.message || "";
   }
   if (session.reconnectTimer) {
     clearTimeout(session.reconnectTimer);
@@ -544,58 +548,46 @@ async function stopCapture(tabId, { notifyStopped, stopReason = "" }) {
   sessions.delete(tabId);
 
   if (notifyStopped) {
-    if (stopReason) {
-      await sendSubtitleEvent(tabId, {
-        type: "subtitle_update",
-        text: "",
-        isFinal: false,
-        status: stopReason
-      }).catch(() => {});
-    }
-    await sendSubtitleEvent(tabId, { type: "subtitle_clear" }).catch(() => {});
-    await notifyBackground(tabId, "stopped", stopReason);
+    await notifyBackground(session, isFailure ? "runtime_failed" : "runtime_stopped", {
+      reason: stopReason || createReason("user_stop", "Stopped by user", "user")
+    });
   }
 }
 
 function getSessionState(tabId) {
   const session = sessions.get(tabId);
-  const state = deriveSessionState(session);
-  const hasSession = Boolean(session && state !== "stopped" && state !== "idle");
+  const websocketState = deriveWebsocketState(session);
 
   return {
     ok: true,
-    active: state === "listening" || state === "reconnecting",
-    hasSession,
-    hasRuntimeSession: hasSession,
-    canStop: hasSession,
-    captureState: state,
-    state,
-    lastError: session?.lastError || ""
+    sessionId: session?.sessionId || null,
+    tabId,
+    hasRuntime: Boolean(session),
+    websocketState,
+    isReconnecting: Boolean(session?.reconnectTimer || websocketState === "connecting"),
+    lastError: session?.lastError || "",
+    isTabActive: session?.isTabActive !== false,
+    hasInactiveTimer: Boolean(session?.inactiveTimer),
+    hasSilenceTimer: Boolean(session?.silenceTimer)
   };
 }
 
-function deriveSessionState(session) {
+function deriveWebsocketState(session) {
   if (!session) {
-    return "idle";
+    return "none";
   }
 
-  if (session.stopping) {
-    return "stopped";
+  switch (session.websocket?.readyState) {
+    case WebSocket.CONNECTING:
+      return "connecting";
+    case WebSocket.OPEN:
+      return "open";
+    case WebSocket.CLOSING:
+    case WebSocket.CLOSED:
+      return "closed";
+    default:
+      return "none";
   }
-
-  if (session.reconnectTimer || session.websocket?.readyState === WebSocket.CONNECTING) {
-    return "reconnecting";
-  }
-
-  if (session.lastError) {
-    return "error";
-  }
-
-  if (session.websocket?.readyState === WebSocket.OPEN) {
-    return "listening";
-  }
-
-  return "starting";
 }
 
 function hasAudibleAudio(samples) {
@@ -652,21 +644,36 @@ function floatToInt16Buffer(float32Buffer) {
   return int16Buffer;
 }
 
-async function sendSubtitleEvent(tabId, message) {
-  await chrome.runtime.sendMessage({
-    target: "background",
-    type: "relay_to_tab",
-    tabId,
-    payload: message
-  });
+function reasonFromCode(code) {
+  switch (code) {
+    case "tab_closed":
+      return createReason("tab_closed", "Tab closed", "page");
+    case "inactive_timeout":
+      return createReason("inactive_timeout", "Stopped after 120 seconds away from the tab", "timeout");
+    case "silence_timeout":
+      return createReason("silence_timeout", "Stopped after 60 seconds without audible audio", "timeout");
+    case "user_stop":
+    default:
+      return createReason("user_stop", "Stopped by user", "user");
+  }
 }
 
-async function notifyBackground(tabId, state, error = "") {
+function createReason(code, message, category) {
+  return {
+    code,
+    message,
+    category,
+    source: "offscreen",
+    at: Date.now()
+  };
+}
+
+async function notifyBackground(session, type, payload = {}) {
   await chrome.runtime.sendMessage({
     target: "background",
-    type: "session_status",
-    tabId,
-    state,
-    error
+    type,
+    sessionId: session.sessionId,
+    tabId: session.tabId,
+    ...payload
   });
 }

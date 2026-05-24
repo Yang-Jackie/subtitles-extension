@@ -35,6 +35,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "ping":
       sendResponse({ ok: true });
       return false;
+    case "render_update":
+    case "render_rehydrate":
+      renderFromSnapshot(message);
+      sendRenderAck(message);
+      sendResponse({ ok: true });
+      return false;
+    case "render_clear":
+      clearSubtitle(true);
+      sendRenderAck(message);
+      sendResponse({ ok: true });
+      return false;
     case "subtitle_update":
       renderSubtitle(message);
       sendResponse({ ok: true });
@@ -49,6 +60,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 ensureOverlay();
+notifyContentReady();
 
 function ensureOverlay() {
   if (overlayRoot?.isConnected) {
@@ -206,6 +218,67 @@ function renderSubtitle(message) {
     renderOverlay();
     scheduleClear();
   }, INTERIM_RENDER_DELAY_MS);
+}
+
+function renderFromSnapshot(message) {
+  const render = message.render || {};
+
+  if (render.mode === "hidden") {
+    clearSubtitle(true);
+    return;
+  }
+
+  if (message.terminalReason?.message && message.captureState !== "running" && message.captureState !== "reconnecting") {
+    renderSubtitle({
+      text: "",
+      isFinal: false,
+      status: message.terminalReason.message
+    });
+    return;
+  }
+
+  if (render.mode === "status" || render.status) {
+    renderSubtitle({
+      text: "",
+      isFinal: false,
+      status: render.status || ""
+    });
+    return;
+  }
+
+  if (render.mode === "caption") {
+    if (render.isFinal) {
+      renderSubtitle({
+        text: render.finalText || "",
+        isFinal: true
+      });
+    } else {
+      finalLine = render.finalText || "";
+      renderSubtitle({
+        text: render.interimText || "",
+        isFinal: false
+      });
+    }
+  }
+}
+
+function notifyContentReady() {
+  chrome.runtime.sendMessage({
+    target: "background",
+    type: "content_ready"
+  }).catch(() => {});
+}
+
+function sendRenderAck(message) {
+  if (!message.sessionId) {
+    return;
+  }
+
+  chrome.runtime.sendMessage({
+    target: "background",
+    type: "render_ack",
+    sessionId: message.sessionId
+  }).catch(() => {});
 }
 
 function renderOverlay() {
