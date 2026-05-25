@@ -7,7 +7,7 @@
       body {
         margin: 0;
         width: 320px;
-        padding: 16px;
+        padding: 14px;
         font-family: "Segoe UI", Arial, sans-serif;
         background: #111827;
         color: #f9fafb;
@@ -15,91 +15,243 @@
 
       h1 {
         margin: 0 0 12px;
-        font-size: 18px;
+        font-size: 15px;
+        font-weight: 700;
       }
 
       label {
         display: block;
-        margin-bottom: 8px;
-        font-size: 13px;
+        margin-bottom: 6px;
+        font-size: 12px;
         font-weight: 600;
+        color: #cbd5e1;
       }
 
       input {
         width: 100%;
         box-sizing: border-box;
-        padding: 10px 12px;
+        padding: 8px 10px;
         border: 1px solid #374151;
-        border-radius: 10px;
+        border-radius: 8px;
         background: #0f172a;
         color: #f9fafb;
+        font-size: 13px;
       }
 
       select {
         width: 100%;
         box-sizing: border-box;
-        padding: 10px 12px;
+        padding: 8px 10px;
         border: 1px solid #374151;
-        border-radius: 10px;
+        border-radius: 8px;
         background: #0f172a;
         color: #f9fafb;
+        font-size: 13px;
       }
 
       button {
         width: 100%;
-        margin-top: 12px;
-        padding: 10px 12px;
+        margin-top: 8px;
+        padding: 9px 12px;
         border: 0;
-        border-radius: 10px;
+        border-radius: 8px;
         font-size: 14px;
         font-weight: 600;
         cursor: pointer;
       }
 
-      #saveButton {
-        background: #2563eb;
-        color: #ffffff;
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
       }
 
-      #toggleButton {
-        background: #10b981;
-        color: #062a1e;
+      #statusPanel {
+        margin-bottom: 10px;
+        padding: 10px 0;
+        border-top: 1px solid #293548;
+        border-bottom: 1px solid #293548;
       }
 
-      #toggleButton.stop {
-        background: #ef4444;
-        color: #ffffff;
+      #statusRow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
       }
 
-      #warning {
-        margin-top: 10px;
-        font-size: 12px;
-        line-height: 1.45;
+      #statusLabel {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #94a3b8;
+      }
+
+      #statusTitle {
+        font-size: 14px;
+        font-weight: 700;
+        line-height: 1.2;
+        text-align: right;
+      }
+
+      #statusPanel.good #statusTitle {
+        color: #86efac;
+      }
+
+      #statusPanel.warning #statusTitle {
         color: #fbbf24;
       }
 
-      #status {
-        min-height: 18px;
+      #statusPanel.danger #statusTitle {
+        color: #fca5a5;
+      }
+
+      #statusDetail {
+        margin-top: 7px;
+        font-size: 12px;
+        line-height: 1.4;
+        color: #94a3b8;
+      }
+
+      #statusDetail:empty {
+        display: none;
+      }
+
+      #toggleButton {
+        margin-top: 0;
+        padding: 10px 12px;
+      }
+
+      #saveButton {
+        width: auto;
+        min-width: 88px;
+        padding: 8px 12px;
+        background: #334155;
+        color: #ffffff;
+        font-size: 13px;
+      }
+
+      #toggleButton {
+        background: #34d399;
+        color: #052e2b;
+      }
+
+      #toggleButton.stop {
+        background: #b91c1c;
+        color: #ffffff;
+      }
+
+      #settings {
+        margin-top: 12px;
+        padding-top: 10px;
+        border-top: 1px solid #293548;
+      }
+
+      #settingsToggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        color: #cbd5e1;
+        text-align: left;
+      }
+
+      #settingsToggleLeft {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      #settingsChevron {
+        color: #94a3b8;
+        font-size: 12px;
+        line-height: 1;
+      }
+
+      #settings.open #settingsChevron {
+        transform: rotate(180deg);
+      }
+
+      #settingsToggle:hover {
+        color: #f9fafb;
+      }
+
+      #settingsTitle {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      #settingsSummary {
+        overflow: hidden;
+        color: #94a3b8;
+        font-size: 12px;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      #settingsPanel {
+        display: none;
         margin-top: 10px;
+      }
+
+      #settings.open #settingsPanel {
+        display: block;
+      }
+
+      #settingsActions {
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      #status {
+        min-height: 16px;
+        margin-top: 8px;
         font-size: 12px;
         color: #cbd5e1;
+      }
+
+      #status:empty {
+        display: none;
       }
     </style>
   </head>
   <body>
     <h1>Real-Time Subtitles</h1>
-    <label for="apiKeyInput">Deepgram API key</label>
-    <input id="apiKeyInput" type="password" placeholder="Paste your Deepgram API key">
-    <label for="languageSelect" style="margin-top: 12px;">Language</label>
-    <select id="languageSelect">
-      <option value="en">English</option>
-      <option value="zh-CN">Mandarin (Simplified)</option>
-      <option value="zh-TW">Mandarin (Traditional)</option>
-      <option value="vi">Vietnamese</option>
-    </select>
-    <button id="saveButton" type="button">Save API Key</button>
+    <section id="statusPanel">
+      <div id="statusRow">
+        <span id="statusLabel">Status</span>
+        <span id="statusTitle">Ready</span>
+      </div>
+      <div id="statusDetail">Subtitles can start on this tab.</div>
+    </section>
     <button id="toggleButton" type="button">Start Subtitles</button>
-    <div id="warning">Warning: this API key is stored locally inside the extension.</div>
+    <section id="settings">
+      <button id="settingsToggle" type="button" aria-expanded="false" aria-controls="settingsPanel">
+        <span id="settingsToggleLeft">
+          <span id="settingsChevron" aria-hidden="true">v</span>
+          <span id="settingsTitle">Settings</span>
+        </span>
+        <span id="settingsSummary">English</span>
+      </button>
+      <div id="settingsPanel">
+        <label for="apiKeyInput">Deepgram API key</label>
+        <input id="apiKeyInput" type="password" placeholder="Paste your Deepgram API key">
+        <label for="languageSelect" style="margin-top: 12px;">Language</label>
+        <select id="languageSelect">
+          <option value="en">English</option>
+          <option value="zh-CN">Mandarin (Simplified)</option>
+          <option value="zh-TW">Mandarin (Traditional)</option>
+          <option value="vi">Vietnamese</option>
+        </select>
+        <div id="settingsActions">
+          <button id="saveButton" type="button">Save</button>
+        </div>
+      </div>
+    </section>
     <div id="status"></div>
     <script src="reason-catalog.js"></script>
     <script src="popup.js"></script>

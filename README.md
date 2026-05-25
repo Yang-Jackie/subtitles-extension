@@ -9,6 +9,7 @@ A Chrome extension that captures audio from the active browser tab, streams it t
 - Displays interim and final subtitle text as an on-page overlay
 - Keeps tab audio audible while capture is active
 - Stores the Deepgram API key and selected language locally in Chrome extension storage
+- Shows a compact popup status with live session updates and collapsible settings
 - Uses `nova-3` with selectable languages: English, Mandarin (Simplified), Mandarin (Traditional), and Vietnamese
 - Lets you drag the whole subtitle overlay and snap it back to the default bottom-center position
 - Keeps the stop button in sync across page reloads and service worker lifecycle changes
@@ -23,7 +24,7 @@ The extension uses a Manifest V3 service worker plus an offscreen document:
 4. Transcript updates are relayed back through the background worker to the content script.
 5. The content script renders a subtitle overlay on the current page.
 
-The offscreen document owns the runtime capture state because it holds the media stream, audio graph, and Deepgram WebSocket. The background worker reconciles that state for the popup and tracks page reload/content-script readiness separately.
+The background worker owns the canonical session state shown to users. The offscreen document owns runtime resources such as the media stream, audio graph, timers, and Deepgram WebSocket, then reports runtime facts back to the background worker. The popup subscribes to live session snapshots while it is open.
 
 ## Requirements
 
@@ -44,10 +45,11 @@ No build step is required. This repo is plain HTML and JavaScript.
 
 1. Open a normal `http` or `https` page that is playing audio.
 2. Click the extension icon.
-3. Paste your Deepgram API key.
-4. Select a language.
-5. Click **Save API Key**.
-6. Click **Start Subtitles**.
+3. Open **Settings** if it is not already expanded.
+4. Paste your Deepgram API key.
+5. Select the transcription language.
+6. Click **Save**.
+7. Click **Start Subtitles**.
 
 When subtitles are active, the extension injects a fixed overlay near the bottom of the page and updates it with interim and final transcript text.
 
@@ -55,7 +57,7 @@ Drag the subtitle box itself to reposition it. Drag it near the default bottom-c
 
 ## Permissions
 
-The extension requests these permissions in [`manifest.json`](/d:/001-Code/Dev/subtitles-extension/manifest.json):
+The extension requests these permissions in [`manifest.json`](manifest.json):
 
 - `activeTab`: identify and interact with the currently focused tab
 - `offscreen`: run audio capture and WebSocket streaming in an offscreen document
@@ -74,21 +76,25 @@ Host permissions allow access to Deepgram plus standard web pages so the content
 
 ## Project Structure
 
-- [`manifest.json`](/d:/001-Code/Dev/subtitles-extension/manifest.json): Chrome extension manifest
-- [`background.js`](/d:/001-Code/Dev/subtitles-extension/background.js): service worker that manages sessions and Chrome APIs
-- [`offscreen.html`](/d:/001-Code/Dev/subtitles-extension/offscreen.html): offscreen document host
-- [`offscreen.js`](/d:/001-Code/Dev/subtitles-extension/offscreen.js): audio pipeline and Deepgram WebSocket client
-- [`pcm-processor.js`](/d:/001-Code/Dev/subtitles-extension/pcm-processor.js): audio worklet that mixes tab audio to mono PCM frames
-- [`content.js`](/d:/001-Code/Dev/subtitles-extension/content.js): subtitle overlay renderer
-- [`popup.html`](/d:/001-Code/Dev/subtitles-extension/popup.html): popup UI
-- [`popup.js`](/d:/001-Code/Dev/subtitles-extension/popup.js): popup state and controls
+- [`manifest.json`](manifest.json): Chrome extension manifest
+- [`background.js`](background.js): service worker that owns canonical session state and Chrome APIs
+- [`session-state.js`](session-state.js): shared capture/page state helpers
+- [`reason-catalog.js`](reason-catalog.js): shared terminal reason and status copy catalog
+- [`audio-utils.js`](audio-utils.js): shared audio conversion utilities
+- [`offscreen.html`](offscreen.html): offscreen document host
+- [`offscreen.js`](offscreen.js): audio pipeline and Deepgram WebSocket client
+- [`pcm-processor.js`](pcm-processor.js): audio worklet that mixes tab audio to mono PCM frames
+- [`content.js`](content.js): subtitle overlay renderer
+- [`popup.html`](popup.html): popup UI
+- [`popup.js`](popup.js): popup state subscription and controls
 
 ## Limitations
 
 - Only `http` and `https` tabs are capturable.
 - The API key is stored locally in extension storage, not encrypted by this project.
 - Language is currently limited to the four options in the popup.
-- There is no automated test suite or packaging workflow in this repo.
+- There is no packaging workflow in this repo.
+- Automated tests cover shared session-state, reason-catalog, and audio utility behavior, but not the full Chrome extension runtime.
 - If the Deepgram WebSocket disconnects repeatedly, recovery depends on the built-in reconnect loop.
 - Subtitles are transient; there is no transcript history panel yet.
 
